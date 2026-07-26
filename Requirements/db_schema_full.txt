@@ -1,0 +1,189 @@
+SARATHI AI 
+This document explains each database table. Each table has a purpose, how it is used in the application, and the columns it contains.
+Projects
+The Projects table is the starting point of the system. Every Azure DevOps project is stored here. All other tables such as Teams, Sprints, Work Items, Repositories, Builds, and Reports are linked to a project. Think of this table as the 'parent' table for the entire application.
+Column (PK/FK) | Data Type | Description
+ProjectId (PK) | INT | Unique identifier for each project.
+AzureProjectId | NVARCHAR(100) | Project ID received from Azure DevOps.
+ProjectName | NVARCHAR(200) | Name of the project.
+Description | NVARCHAR(MAX) | Brief information about the project.
+Visibility | NVARCHAR(20) | Whether the project is Public or Private.
+CreatedDate | DATETIME | Date the project was created.
+LastUpdated | DATETIME | Last synchronization time.
+
+Teams
+The Teams table stores the different teams working on a project. A single project can have many teams such as Backend, Frontend, QA, and DevOps. Each team always belongs to one project.
+Column (PK/FK) | Data Type | Description
+TeamId (PK) | INT | Unique team identifier.
+AzureTeamId | NVARCHAR(100) | Azure DevOps team ID.
+ProjectId (FK) | INT | References Projects.ProjectId.
+TeamName | NVARCHAR(150) | Name of the team.
+Description | NVARCHAR(MAX) | Purpose of the team.
+
+Sprints
+The Sprints table stores iteration information. A sprint represents a fixed development period (for example, two weeks) during which the team completes planned work.
+Column (PK/FK) | Data Type | Description
+SprintId (PK) | INT | Unique sprint identifier.
+AzureIterationId | NVARCHAR(100) | Azure iteration ID.
+ProjectId (FK) | INT | Project to which the sprint belongs.
+SprintName | NVARCHAR(150) | Sprint name.
+StartDate | DATE | Sprint start date.
+EndDate | DATE | Sprint end date.
+TimeFrame | NVARCHAR(50) | Past, Current or Future.
+
+WorkItems
+The WorkItems table is the most important table in the system. It stores all development work such as Epics, Features, User Stories, Tasks, Bugs, and Issues. Every work item belongs to a project and is usually assigned to a sprint and a user.
+Column (PK/FK) | Data Type | Description
+WorkItemId (PK) | INT | Unique work item.
+AzureWorkItemId | INT | Azure DevOps work item ID.
+ProjectId (FK) | INT | Project reference.
+SprintId (FK) | INT | Sprint reference.
+Title | NVARCHAR(300) | Work item title.
+WorkItemType | NVARCHAR(50) | Epic, Story, Task, Bug or Issue.
+State | NVARCHAR(50) | Current status.
+Priority | INT | Priority level.
+AssignedTo (FK) | INT | User assigned to the work.
+CreatedBy (FK) | INT | User who created it.
+CreatedDate | DATETIME | Creation date.
+ChangedDate | DATETIME | Last updated date.
+StoryPoints | DECIMAL(5,2) | Estimated story points.
+Effort | DECIMAL(5,2) | Estimated effort.
+RemainingWork | DECIMAL(5,2) | Work still remaining.
+
+WorkItemHistory
+This table keeps a history of every change made to a work item. Instead of overwriting old values, each status change is stored as a new record. This helps calculate lead time and cycle time.
+Column (PK/FK) | Data Type | Description
+Id (PK) | INT | History record ID.
+WorkItemId (FK) | INT | Related work item.
+State | NVARCHAR(50) | Status after the change.
+ChangedDate | DATETIME | When the change happened.
+ChangedBy (FK) | INT | User who made the change.
+
+Repositories
+Stores Git repositories used by the project. Each project can contain one or more repositories where developers store source code.
+Column (PK/FK) | Data Type | Description
+RepositoryId (PK) | INT | Repository ID.
+AzureRepoId | NVARCHAR(100) | Azure repository ID.
+ProjectId (FK) | INT | Project reference.
+RepositoryName | NVARCHAR(200) | Repository name.
+DefaultBranch | NVARCHAR(100) | Default Git branch.
+Size | BIGINT | Repository size.
+Url | NVARCHAR(500) | Repository URL.
+
+PullRequests
+Stores pull requests created by developers for code review before merging changes into the main branch.
+Column (PK/FK) | Data Type | Description
+PullRequestId (PK) | INT | Pull request ID.
+AzurePRId | INT | Azure PR ID.
+RepositoryId (FK) | INT | Repository reference.
+Title | NVARCHAR(300) | Title.
+Status | NVARCHAR(50) | Current status.
+SourceBranch | NVARCHAR(100) | Source branch.
+TargetBranch | NVARCHAR(100) | Target branch.
+CreatedBy (FK) | INT | Creator.
+CreatedDate | DATETIME | Creation date.
+ClosedDate | DATETIME | Closing date.
+IsDraft | BIT | Draft flag.
+MergeStatus | NVARCHAR(50) | Merge result.
+
+Builds
+Stores information about CI/CD pipeline executions such as successful or failed builds.
+Column (PK/FK) | Data Type | Description
+BuildId (PK) | INT | Build ID.
+AzureBuildId | INT | Azure build ID.
+ProjectId (FK) | INT | Project.
+DefinitionName | NVARCHAR(200) | Pipeline name.
+BuildNumber | NVARCHAR(100) | Build number.
+Status | NVARCHAR(50) | Running/Completed.
+Result | NVARCHAR(50) | Succeeded/Failed.
+StartTime | DATETIME | Start.
+FinishTime | DATETIME | Finish.
+SourceBranch | NVARCHAR(100) | Git branch.
+SourceVersion | NVARCHAR(100) | Commit ID.
+
+Releases
+Stores deployment information when builds are released to testing or production environments.
+Column (PK/FK) | Data Type | Description
+ReleaseId (PK) | INT | Release ID.
+ProjectId (FK) | INT | Project.
+ReleaseName | NVARCHAR(200) | Release name.
+Status | NVARCHAR(50) | Deployment status.
+CreatedDate | DATETIME | Created.
+CompletedDate | DATETIME | Completed.
+
+Users
+Stores user information such as developers, testers, managers and administrators.
+Column (PK/FK) | Data Type | Description
+UserId (PK) | INT | User ID.
+AzureUserId | NVARCHAR(100) | Azure ID.
+DisplayName | NVARCHAR(150) | User name.
+Email | NVARCHAR(200) | Email.
+Role | NVARCHAR(100) | Role.
+
+SyncLogs
+Keeps track of every synchronization with Azure DevOps. Useful for troubleshooting sync failures.
+Column (PK/FK) | Data Type | Description
+Id (PK) | INT | Log ID.
+SyncType | NVARCHAR(50) | Type.
+StartTime | DATETIME | Started.
+EndTime | DATETIME | Finished.
+Status | NVARCHAR(50) | Result.
+RecordsProcessed | INT | Records.
+ErrorMessage | NVARCHAR(MAX) | Errors.
+
+KPISnapshots
+Stores calculated KPI values so dashboards can load quickly without recalculating every time.
+Column (PK/FK) | Data Type | Description
+Id (PK) | INT | Snapshot ID.
+ProjectId (FK) | INT | Project.
+SprintId (FK) | INT | Sprint.
+SnapshotDate | DATE | Date.
+SprintVelocity | DECIMAL | Velocity.
+PlannedStoryPoints | DECIMAL | Planned.
+CompletedStoryPoints | DECIMAL | Completed.
+CompletionRate | DECIMAL | Completion %.
+DefectDensity | DECIMAL | Defect density.
+BacklogHealth | DECIMAL | Backlog health.
+ReleaseSuccessRate | DECIMAL | Release success %.
+OpenBugs | INT | Open bugs.
+ResolvedBugs | INT | Resolved bugs.
+
+RiskAnalysis
+Stores AI-generated project risk scores and summaries based on project data.
+Column (PK/FK) | Data Type | Description
+Id (PK) | INT | Risk ID.
+ProjectId (FK) | INT | Project.
+SprintId (FK) | INT | Sprint.
+RiskScore | DECIMAL | Score.
+RiskLevel | NVARCHAR(20) | Low/Medium/High.
+RiskSummary | NVARCHAR(MAX) | Summary.
+GeneratedDate | DATETIME | Generated.
+
+RiskFactors
+Stores individual reasons that contributed to the calculated project risk.
+Column (PK/FK) | Data Type | Description
+Id (PK) | INT | Factor ID.
+RiskAnalysisId (FK) | INT | Risk analysis.
+FactorName | NVARCHAR | Factor.
+FactorValue | DECIMAL | Value.
+Description | NVARCHAR(MAX) | Explanation.
+
+AIRecommendations
+Stores suggestions generated by AI to reduce project risks and improve delivery.
+Column (PK/FK) | Data Type | Description
+Id (PK) | INT | Recommendation ID.
+ProjectId (FK) | INT | Project.
+RiskAnalysisId (FK) | INT | Risk.
+Recommendation | NVARCHAR(MAX) | Recommendation.
+Priority | NVARCHAR(20) | Priority.
+CreatedDate | DATETIME | Created.
+
+ExecutiveReports
+Stores high-level reports prepared for project managers and executives.
+Column (PK/FK) | Data Type | Description
+Id (PK) | INT | Report ID.
+ProjectId (FK) | INT | Project.
+ReportTitle | NVARCHAR | Title.
+Summary | NVARCHAR(MAX) | Summary.
+GeneratedDate | DATETIME | Generated.
+GeneratedBy (FK) | INT | User.

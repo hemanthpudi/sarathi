@@ -1,0 +1,83 @@
+Technical Requirements Document
+1. The system shall connect to Azure DevOps using REST APIs.
+Technical Design (TRD)
+• Integrate Azure DevOps REST APIs for data retrieval.
+• Implement API connection validation and error handling.
+Development Tasks
+1. Develop Azure DevOps API integration service.
+2. Configure connection validation and logging.
+2. The system shall synchronize work items, user stories, tasks, bugs, and epics.
+Technical Design (TRD)
+• Build a synchronization service to fetch and process work items.
+Development Tasks
+1. Develop work item synchronization module.
+2. Implement data mapping and duplicate validation.
+3. The system shall store synchronized data in Azure SQL Database.
+Technical Design (TRD)
+• Design Azure SQL database schema for project data.
+• Implement data persistence and retrieval services.
+Development Tasks
+1. Create database tables and relationships.
+2. Develop data storage and retrieval logic.
+4. The system shall authenticate users using Microsoft Entra ID.
+Technical Design (TRD)
+• Integrate Microsoft Entra ID using OAuth 2.0
+• Implement secure user session management.
+Development Tasks
+1. Configure Entra ID authentication.
+2. Implement login and logout functionality.
+5. The system shall provide role-based authorization.
+Technical Design (TRD)
+• Implement Role-Based Access Control (RBAC).
+• Define permissions for each user role.
+Development Tasks
+1. Create roles and permission mappings.
+2. Implement authorization rules across modules.
+6. The system shall prevent unauthorized access to protected REST API endpoints.
+Technical Design (TRD)
+• Secure APIs using token / Id based authentication.
+• Enforce authorization checks before API access.
+Development Tasks
+1. Implement API authentication and authorization middleware.
+2. Configure security validation for protected endpoints.
+7. The system shall calculate sprint velocity, measure sprint completion rate, track defect density,
+calculate backlog health metrics, measure story completion trends, calculate release success rates, and
+provide KPI trend analysis.
+Technical Design (TRD)
+• Develop a KPI Engine to process synchronized Azure DevOps data and calculate delivery metrics.
+• Store KPI results and historical trends for reporting and dashboard visualization.
+Development Tasks
+1. Implement KPI calculation services and business rules.
+2. Develop KPI trend analysis and historical data storage.
+8. The system shall display sprint progress, track completed versus planned work, identify delayed work
+items, and monitor sprint commitments.
+Technical Design (TRD)
+• Build a Sprint Governance module to monitor sprint execution and delivery performance.
+• Generate sprint health indicators using sprint and work item data.
+Development Tasks
+1. Develop sprint tracking and progress monitoring services.
+2. Implement delayed work item detection and sprint health calculations.
+9. The system shall analyze delivery metrics using Azure OpenAI, identify delivery risks, predict schedule
+slippages, identify productivity bottlenecks, and recommend mitigation actions.
+Technical Design (TRD)
+• Integrate Azure OpenAI to evaluate delivery metrics and generate risk insights.
+• Use AI prompts and governance data to produce risk predictions and recommendations.
+Development Tasks
+1. Implement Azure OpenAI integration and prompt management.
+2. Develop risk analysis, prediction, and recommendation services.
+10. The system shall generate executive summaries, summarize project health, generate portfolio reports,
+create sprint review summaries, and provide AI-generated recommendations.
+Technical Design (TRD)
+• Build an AI reporting module to transform governance data into business-friendly summaries.
+• Generate downloadable reports and executive-level insights.
+Development Tasks
+1. Develop AI-powered report generation services.
+2. Implement report export and summary generation functionality
+11. The system shall provide role-based dashboards, display KPI metrics visually, display risk indicators,
+provide project health dashboards, and support filtering and drill-down capabilities.
+Technical Design (TRD)
+• Develop interactive dashboards with role-based data access and visual analytics.
+• Implement filtering, drill-down, and data exploration capabilities.
+Development Tasks
+1. Create dashboard UI components and visualization widgets.
+2. Implement filtering, drill-down, and role-based dashboard access. 

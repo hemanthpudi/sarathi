@@ -1,0 +1,109 @@
+DB Table	Azure DevOps API
+Projects	GET https://dev.azure.com/{organization}/_apis/projects?api-version=7.1
+Teams	GET https://dev.azure.com/{organization}/_apis/projects/{projectId}/teams?api-version=7.1
+Sprints	GET https://dev.azure.com/{organization}/{project}/{team}/_apis/work/teamsettings/iterations?api-version=7.1
+WorkItems	POST https://dev.azure.com/{organization}/{project}/_apis/wit/wiql?api-version=7.1 then GET /_apis/wit/workitems
+WorkItemHistory	GET https://dev.azure.com/{organization}/{project}/_apis/wit/workItems/{id}/updates?api-version=7.1
+Repositories	GET https://dev.azure.com/{organization}/{project}/_apis/git/repositories?api-version=7.1
+PullRequests	GET https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{repoId}/pullrequests?api-version=7.1
+Builds	GET https://dev.azure.com/{organization}/{project}/_apis/build/builds?api-version=7.1
+Releases	GET https://vsrm.dev.azure.com/{organization}/{project}/_apis/release/releases?api-version=7.1
+Users	GET https://vssps.dev.azure.com/{organization}/_apis/graph/users?api-version=7.1-preview.1
+
+
+
+
+
+
+WorkItems Integration Documentation (WIQL → WorkItems API → Database)
+The WorkItems table stores all Azure DevOps work items such as:
+Epics
+•	Features
+o	User Stories
+Tasks
+Bugs
+Issues
+Azure DevOps requires two API calls to populate this table:
+•	Step 1: Execute WIQL Query
+         ↓
+Returns Work Item IDs
+Api 1 EndPoint:
+POST https://dev.azure.com/{organization}/{project}/_apis/wit/wiql?api-version=7.1
+Request Headers:
+Authorization: Basic <PAT>
+Content-Type: application/json
+Request Body:
+{
+  "query": "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = 'Sarathi-AI'"
+}
+Response:
+{
+  "queryType": "flat",
+  "workItems": [
+    {
+      "id": 101
+    },
+    {
+      "id": 102
+    },
+    {
+      "id": 103
+    }
+  ]
+}
+
+•	Step 2: Get Work Item Details from fetched workitem ids
+         ↓
+Returns Full Work Item Data
+API 2 Endpoint:
+GET https://dev.azure.com/{organization}/_apis/wit/workitems?ids={ids}&api-version=7.1
+Response:
+{
+  "id": 101,
+  "fields": {
+    "System.Title": "Login Page Development",
+    "System.WorkItemType": "User Story",
+    "System.State": "Active",
+    "Microsoft.VSTS.Common.Priority": 1,
+    "System.AssignedTo": {
+      "displayName": "John Smith"
+    },
+    "System.CreatedBy": {
+      "displayName": "Admin User"
+    },
+    "System.IterationPath": "Sarathi-AI\\Sprint 1"’
+"Microsoft.VSTS.Scheduling.StoryPoints": 8,
+        	"Microsoft.VSTS.Scheduling.Effort": 12,
+       	"Microsoft.VSTS.Scheduling.RemainingWork": 4
+
+  }
+}
+
+•	Step 3: Map Data fetched from API to Database tables
+         ↓
+Insert into WorkItems Table
+
+
+
+Column Name	Value
+WorkItemId	1001
+AzureWorkItemId	101
+ProjectId	1 (from Projects table)
+SprintId	5 (from Sprints table)
+Title	Login Page Development
+WorkItemType	User Story
+State	Active
+Priority	1
+AssignedTo	10 (from Users table)
+CreatedBy	2 (from Login Users table)
+CreatedDate	2025-01-10
+ChangedDate	2025-01-12
+StoryPoints	8
+Effort	12
+RemainingWork	4
+
+WorkItemHistory:
+
+GET https://dev.azure.com/{organization}/{project}/_apis/wit/workItems/{id}/updates?api-version=7.1 In this API, {id} is linked with workitems table primary key
+
+
