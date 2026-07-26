@@ -38,4 +38,8 @@ public class AdminProjectStatisticItemDto
     public decimal? RiskScore { get; set; }
 
     public string? RiskLevel { get; set; }
+
+    public string? ProjectManagerName { get; set; }
+
+    public string? ProjectManagerEmail { get; set; }
 }

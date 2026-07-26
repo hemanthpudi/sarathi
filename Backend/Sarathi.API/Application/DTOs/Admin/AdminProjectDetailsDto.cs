@@ -119,6 +119,8 @@ public class AdminProjectRepositoryDto
     public long? Size { get; set; }
 
     public string? Url { get; set; }
+
+    public DateTime? LastUpdatedUtc { get; set; }
 }
 
 public class AdminProjectBuildDto
@@ -140,4 +142,6 @@ public class AdminProjectBuildDto
     public DateTime StartTime { get; set; }
 
     public DateTime? FinishTime { get; set; }
+
+    public string? TriggerType { get; set; }
 }

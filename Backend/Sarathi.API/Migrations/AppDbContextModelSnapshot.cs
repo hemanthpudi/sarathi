@@ -298,6 +298,9 @@ namespace Sarathi.API.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("nvarchar(50)");
 
+                    b.Property<string>("TriggerType")
+                        .HasColumnType("nvarchar(max)");
+
                     b.HasKey("BuildId");
 
                     b.HasIndex("AzureBuildId")
@@ -611,6 +614,9 @@ namespace Sarathi.API.Migrations
                     b.Property<string>("DefaultBranch")
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime?>("LastUpdatedUtc")
+                        .HasColumnType("datetime2");
 
                     b.Property<int>("ProjectId")
                         .HasColumnType("int");

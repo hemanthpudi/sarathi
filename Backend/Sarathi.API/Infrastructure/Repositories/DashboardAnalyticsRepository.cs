@@ -42,6 +42,11 @@ public class DashboardAnalyticsRepository : IDashboardAnalyticsRepository
         };
     }
 
+    public Task<bool> HasSynchronizedProjectDataAsync(CancellationToken cancellationToken = default)
+    {
+        return _dbContext.Projects.AsNoTracking().AnyAsync(cancellationToken);
+    }
+
     public async Task<DashboardProjectStatisticsDto> GetProjectStatisticsAsync(int take, CancellationToken cancellationToken = default)
     {
         var projects = await _dbContext.Projects

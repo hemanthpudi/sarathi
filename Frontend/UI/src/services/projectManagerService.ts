@@ -41,6 +41,8 @@ export interface ProjectManagerAssignedProjectDto {
   deliveryHealth: string;
   completionRate: number | null;
   sprintVelocity: number | null;
+  riskScore: number | null;
+  riskLevel: string | null;
   blockedItems: number;
   lastUpdated: string;
 }

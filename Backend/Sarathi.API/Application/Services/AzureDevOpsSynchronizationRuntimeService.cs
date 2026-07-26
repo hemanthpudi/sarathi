@@ -50,6 +50,38 @@ public class AzureDevOpsSynchronizationRuntimeService : IAzureDevOpsSynchronizat
         }
     }
 
+    public async Task<bool> SynchronizeNowAsync(CancellationToken cancellationToken = default)
+    {
+        var configuration = await _adminConfigurationRepository.GetActiveAsync(cancellationToken);
+        if (configuration is null || !configuration.AzureDevOpsSyncEnabled)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(configuration.AzureDevOpsOrganizationUrl)
+            || (string.IsNullOrWhiteSpace(configuration.AzureDevOpsPatCipherText) && string.IsNullOrWhiteSpace(_configuredPersonalAccessToken)))
+        {
+            return false;
+        }
+
+        var job = new AzureDevOpsSyncJob
+        {
+            SyncType = "Full",
+            ScopeName = "All Projects",
+            Status = "Queued",
+            Source = "OnDemand",
+            TriggeredByDisplayName = "LiveFirstSync",
+            StartedAtUtc = DateTime.UtcNow,
+        };
+
+        _dbContext.AzureDevOpsSyncJobs.Add(job);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        await ProcessJobAsync(job, cancellationToken);
+
+        return job.Status.Equals("Completed", StringComparison.OrdinalIgnoreCase);
+    }
+
     private async Task ProcessJobAsync(AzureDevOpsSyncJob job, CancellationToken cancellationToken)
     {
         var startedAt = DateTime.UtcNow;
@@ -63,14 +95,8 @@ public class AzureDevOpsSynchronizationRuntimeService : IAzureDevOpsSynchronizat
             }
 
             var configuration = await _adminConfigurationRepository.GetActiveAsync(cancellationToken);
-            if (configuration is null || !configuration.AzureDevOpsSyncEnabled)
-            {
-                await FailJobAsync(trackedJob, "Azure DevOps integration is not enabled.", cancellationToken);
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(configuration.AzureDevOpsOrganizationUrl)
-                || (string.IsNullOrWhiteSpace(configuration.AzureDevOpsPatCipherText) && string.IsNullOrWhiteSpace(_configuredPersonalAccessToken)))
+            if (configuration is null || (string.IsNullOrWhiteSpace(configuration.AzureDevOpsOrganizationUrl)
+                || (string.IsNullOrWhiteSpace(configuration.AzureDevOpsPatCipherText) && string.IsNullOrWhiteSpace(_configuredPersonalAccessToken))))
             {
                 await FailJobAsync(trackedJob, "Azure DevOps organization URL or PAT is not configured.", cancellationToken);
                 return;
@@ -198,6 +224,7 @@ public class AzureDevOpsSynchronizationRuntimeService : IAzureDevOpsSynchronizat
                     repository.DefaultBranch = data.DefaultBranch;
                     repository.Size = data.Size;
                     repository.Url = data.Url;
+                    repository.LastUpdatedUtc = DateTime.UtcNow;
                     processed++;
                 }
             }
@@ -246,6 +273,7 @@ public class AzureDevOpsSynchronizationRuntimeService : IAzureDevOpsSynchronizat
                     build.SourceBranch = data.SourceBranch;
                     build.StartTime = data.StartTimeUtc ?? DateTime.UtcNow;
                     build.FinishTime = data.FinishTimeUtc;
+                    build.TriggerType = data.TriggerType;
                     processed++;
                 }
             }

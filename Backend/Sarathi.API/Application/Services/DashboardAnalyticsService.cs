@@ -6,36 +6,53 @@ namespace Sarathi.API.Application.Services;
 public class DashboardAnalyticsService : IDashboardAnalyticsService
 {
     private readonly IDashboardAnalyticsRepository _dashboardAnalyticsRepository;
+    private readonly IAzureDevOpsSynchronizationRuntimeService _azureDevOpsSyncRuntimeService;
 
-    public DashboardAnalyticsService(IDashboardAnalyticsRepository dashboardAnalyticsRepository)
+    public DashboardAnalyticsService(
+        IDashboardAnalyticsRepository dashboardAnalyticsRepository,
+        IAzureDevOpsSynchronizationRuntimeService azureDevOpsSyncRuntimeService)
     {
         _dashboardAnalyticsRepository = dashboardAnalyticsRepository;
+        _azureDevOpsSyncRuntimeService = azureDevOpsSyncRuntimeService;
     }
 
-    public Task<DashboardMetricsDto> GetMetricsAsync(CancellationToken cancellationToken = default)
+    public async Task<DashboardMetricsDto> GetMetricsAsync(CancellationToken cancellationToken = default)
     {
-        return _dashboardAnalyticsRepository.GetMetricsAsync(cancellationToken);
+        await EnsureLiveDataAsync(cancellationToken);
+        return await _dashboardAnalyticsRepository.GetMetricsAsync(cancellationToken);
     }
 
-    public Task<DashboardProjectStatisticsDto> GetProjectStatisticsAsync(int take, CancellationToken cancellationToken = default)
+    public async Task<DashboardProjectStatisticsDto> GetProjectStatisticsAsync(int take, CancellationToken cancellationToken = default)
     {
+        await EnsureLiveDataAsync(cancellationToken);
         var normalizedTake = take <= 0 ? 20 : Math.Min(take, 100);
-        return _dashboardAnalyticsRepository.GetProjectStatisticsAsync(normalizedTake, cancellationToken);
+        return await _dashboardAnalyticsRepository.GetProjectStatisticsAsync(normalizedTake, cancellationToken);
     }
 
-    public Task<DashboardSprintStatisticsDto> GetSprintStatisticsAsync(int take, CancellationToken cancellationToken = default)
+    public async Task<DashboardSprintStatisticsDto> GetSprintStatisticsAsync(int take, CancellationToken cancellationToken = default)
     {
+        await EnsureLiveDataAsync(cancellationToken);
         var normalizedTake = take <= 0 ? 20 : Math.Min(take, 100);
-        return _dashboardAnalyticsRepository.GetSprintStatisticsAsync(normalizedTake, cancellationToken);
+        return await _dashboardAnalyticsRepository.GetSprintStatisticsAsync(normalizedTake, cancellationToken);
     }
 
-    public Task<DashboardWorkItemSummariesDto> GetWorkItemSummariesAsync(CancellationToken cancellationToken = default)
+    public async Task<DashboardWorkItemSummariesDto> GetWorkItemSummariesAsync(CancellationToken cancellationToken = default)
     {
-        return _dashboardAnalyticsRepository.GetWorkItemSummariesAsync(cancellationToken);
+        await EnsureLiveDataAsync(cancellationToken);
+        return await _dashboardAnalyticsRepository.GetWorkItemSummariesAsync(cancellationToken);
     }
 
-    public Task<DashboardKpiCalculationsDto> GetKpiCalculationsAsync(CancellationToken cancellationToken = default)
+    public async Task<DashboardKpiCalculationsDto> GetKpiCalculationsAsync(CancellationToken cancellationToken = default)
     {
-        return _dashboardAnalyticsRepository.GetKpiCalculationsAsync(cancellationToken);
+        await EnsureLiveDataAsync(cancellationToken);
+        return await _dashboardAnalyticsRepository.GetKpiCalculationsAsync(cancellationToken);
+    }
+
+    private async Task EnsureLiveDataAsync(CancellationToken cancellationToken)
+    {
+        if (!await _dashboardAnalyticsRepository.HasSynchronizedProjectDataAsync(cancellationToken))
+        {
+            await _azureDevOpsSyncRuntimeService.SynchronizeNowAsync(cancellationToken);
+        }
     }
 }

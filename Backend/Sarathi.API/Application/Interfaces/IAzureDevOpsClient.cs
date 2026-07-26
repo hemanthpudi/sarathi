@@ -107,6 +107,8 @@ public sealed class AzureDevOpsBuildData
     public DateTime? StartTimeUtc { get; init; }
 
     public DateTime? FinishTimeUtc { get; init; }
+
+    public string? TriggerType { get; init; }
 }
 
 public sealed class AzureDevOpsReleaseData

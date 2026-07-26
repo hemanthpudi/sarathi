@@ -115,6 +115,27 @@ export interface AzureDevOpsSyncQueueResponseDto {
   queuedAtUtc: string;
 }
 
+export interface AzureDevOpsSyncJobSummaryDto {
+  jobId: number;
+  syncType: string;
+  scopeName: string;
+  status: string;
+  source: string;
+  triggeredByDisplayName: string;
+  itemsProcessed: number;
+  itemsSucceeded: number;
+  itemsFailed: number;
+  durationSeconds: number | null;
+  errorMessage: string | null;
+  startedAtUtc: string;
+  completedAtUtc: string | null;
+}
+
+export interface AzureDevOpsSyncJobsDto {
+  generatedAtUtc: string;
+  items: AzureDevOpsSyncJobSummaryDto[];
+}
+
 export interface AzureDevOpsConnectionTestRequestDto {
   organizationUrl: string;
   personalAccessToken?: string;
@@ -163,6 +184,13 @@ export const azureDevOpsService = {
 
   async queueSynchronization(payload: QueueAzureDevOpsSyncRequestDto): Promise<AzureDevOpsSyncQueueResponseDto> {
     const response = await azureDevOpsApi.post<AzureDevOpsSyncQueueResponseDto>('/api/integrations/azure-devops/sync-jobs', payload);
+    return response.data;
+  },
+
+  async getSyncJobs(take = 50): Promise<AzureDevOpsSyncJobsDto> {
+    const response = await azureDevOpsApi.get<AzureDevOpsSyncJobsDto>('/api/integrations/azure-devops/sync-jobs', {
+      params: { take },
+    });
     return response.data;
   },
 
