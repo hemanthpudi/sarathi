@@ -16,5 +16,7 @@ public class Repository
 
     public string? Url { get; set; }
 
+    public DateTime? LastUpdatedUtc { get; set; }
+
     public Project Project { get; set; } = null!;
 }

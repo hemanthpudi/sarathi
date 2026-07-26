@@ -156,6 +156,7 @@ public class AdminService : IAdminService
                     DefaultBranch = item.DefaultBranch,
                     Size = item.Size,
                     Url = item.Url,
+                    LastUpdatedUtc = item.LastUpdatedUtc,
                 })
                 .ToListAsync(cancellationToken),
             new List<AdminProjectRepositoryDto>(),
@@ -177,6 +178,7 @@ public class AdminService : IAdminService
                     SourceBranch = item.SourceBranch,
                     StartTime = item.StartTime,
                     FinishTime = item.FinishTime,
+                    TriggerType = item.TriggerType,
                 })
                 .ToListAsync(cancellationToken),
             new List<AdminProjectBuildDto>(),

@@ -1,4 +1,7 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Sarathi.API.Persistence;
 
 #nullable disable
 
@@ -9,6 +12,8 @@ namespace Sarathi.API.Migrations;
 /// recorded but its tables were not created. Every statement is conditional,
 /// making the migration safe for databases where the tables already exist.
 /// </summary>
+[DbContext(typeof(AppDbContext))]
+[Migration("20260722160000_EnsureRepositoriesAndBuildsExist")]
 public partial class EnsureRepositoriesAndBuildsExist : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)
