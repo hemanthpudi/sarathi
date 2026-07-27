@@ -4,6 +4,8 @@ namespace Sarathi.API.Application.Interfaces;
 
 public interface IDashboardAnalyticsRepository
 {
+    Task<bool> HasSynchronizedProjectDataAsync(CancellationToken cancellationToken = default);
+
     Task<DashboardMetricsDto> GetMetricsAsync(CancellationToken cancellationToken = default);
 
     Task<DashboardProjectStatisticsDto> GetProjectStatisticsAsync(int take, CancellationToken cancellationToken = default);

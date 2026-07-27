@@ -6,6 +6,8 @@ public interface IProjectManagerRepository
 {
     Task<bool> IsProjectAssignedAsync(Guid userId, int projectId, CancellationToken cancellationToken = default);
 
+    Task<bool> HasSynchronizedProjectDataAsync(CancellationToken cancellationToken = default);
+
     Task<ProjectManagerDashboardDto> GetDashboardAsync(Guid userId, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<ProjectManagerAssignedProjectDto>> GetAssignedProjectsAsync(Guid userId, CancellationToken cancellationToken = default);

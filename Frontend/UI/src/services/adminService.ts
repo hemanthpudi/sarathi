@@ -60,6 +60,8 @@ export interface AdminProjectStatisticItemDto {
   defectDensity: number | null;
   riskScore: number | null;
   riskLevel: string | null;
+  projectManagerName: string | null;
+  projectManagerEmail: string | null;
 }
 
 export interface AdminProjectStatisticsDto {
@@ -139,6 +141,7 @@ export interface AdminProjectRepositoryDto {
   defaultBranch: string | null;
   size: number | null;
   url: string | null;
+  lastUpdatedUtc: string | null;
 }
 
 export interface AdminProjectBuildDto {
@@ -151,6 +154,7 @@ export interface AdminProjectBuildDto {
   sourceBranch: string;
   startTime: string;
   finishTime: string | null;
+  triggerType: string | null;
 }
 
 export interface ProjectSprintGovernanceItemDto {

@@ -123,10 +123,25 @@ public class ProjectManagerRepository : IProjectManagerRepository
                     .OrderByDescending(kpi => kpi.SnapshotDate)
                     .Select(kpi => kpi.SprintVelocity)
                     .FirstOrDefault(),
+                RiskScore = _dbContext.ProjectRiskAnalyses
+                    .Where(risk => risk.ProjectId == assignment.ProjectId)
+                    .OrderByDescending(risk => risk.GeneratedDate)
+                    .Select(risk => (decimal?)risk.RiskScore)
+                    .FirstOrDefault(),
+                RiskLevel = _dbContext.ProjectRiskAnalyses
+                    .Where(risk => risk.ProjectId == assignment.ProjectId)
+                    .OrderByDescending(risk => risk.GeneratedDate)
+                    .Select(risk => risk.RiskLevel)
+                    .FirstOrDefault(),
                 BlockedItems = _dbContext.WorkItems.Count(workItem => workItem.ProjectId == assignment.ProjectId && (workItem.IsBlocked || workItem.State == "Blocked")),
                 LastUpdated = assignment.Project != null ? assignment.Project.LastUpdated : assignment.AssignedAtUtc,
             })
             .ToListAsync(cancellationToken);
+    }
+
+    public Task<bool> HasSynchronizedProjectDataAsync(CancellationToken cancellationToken = default)
+    {
+        return _dbContext.Projects.AsNoTracking().AnyAsync(cancellationToken);
     }
 
     public async Task<ProjectManagerSprintProgressDto> GetSprintProgressAsync(Guid userId, CancellationToken cancellationToken = default)

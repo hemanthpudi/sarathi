@@ -130,14 +130,7 @@ public class ProjectManagerController : ControllerBase
         var userId = GetAuthenticatedUserId();
         if (userId == Guid.Empty) return Unauthorized();
         if (!await _projectManagerService.IsProjectAssignedAsync(userId, projectId, cancellationToken)) return Forbid();
-
-        var analysis = await _projectManagerAiService.AnalyzeProjectAsync(userId, projectId, request?.Question, cancellationToken);
-        if (string.IsNullOrWhiteSpace(analysis.Report))
-        {
-            analysis.Report = "I can only answer questions about the assigned project scope for this project. Ask me about delivery health, sprint progress, blockers, risk, work items, or recommendations.";
-        }
-
-        return Ok(analysis);
+        return Ok(await _projectManagerAiService.AnalyzeProjectAsync(userId, projectId, request?.Question, cancellationToken));
     }
 
     private Guid GetAuthenticatedUserId()

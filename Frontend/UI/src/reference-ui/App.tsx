@@ -21,7 +21,7 @@ import {
   ArrowUpRight, ArrowDownRight, Minus, CheckSquare, List,
   Percent, Star, Briefcase, GitMerge, Inbox, Hash, Check,
   Globe, Server, ChevronLeft, LogOut, HardDrive, Mail,
-  BarChart2, User, PhoneCall, Gauge, Radio, Triangle, Hexagon
+  BarChart2, User, PhoneCall, Gauge, Radio, Triangle, Hexagon, PlayCircle
 } from "lucide-react";
 import { adminService, type AdminProjectStatisticItemDto, type AdminProjectStatisticsDto, type AdminProjectDetailsDto, type ProjectSprintGovernanceDto } from "../services/adminService";
 import {
@@ -35,7 +35,7 @@ import {
 } from "../services/projectManagerService";
 import { itAdminService, type ItAdminLogEntryDto, type ItAdminLogsDto, type ItAdminMaintenanceDto, type ItAdminSchedulingDto, type ItAdminSyncJobDto, type ItAdminSyncMonitoringDto, type ItAdminSynchronizationDto, type ItAdminSystemHealthDto, type ItAdminUserDto, type ItAdminLoginAuditDto, type TriggerItAdminSyncRequestDto } from "../services/itAdminService";
 import { dashboardService, type DashboardKpiCalculationsDto } from "../services/dashboardService";
-import { azureDevOpsService, type AzureDevOpsIntegrationConfigurationDto, type AzureDevOpsLiveSummaryDto, type UpdateAzureDevOpsIntegrationConfigurationRequestDto } from "../services/azureDevOpsService";
+import { azureDevOpsService, type AzureDevOpsIntegrationConfigurationDto, type AzureDevOpsLiveSummaryDto, type AzureDevOpsScheduleDto, type UpdateAzureDevOpsIntegrationConfigurationRequestDto, type UpsertAzureDevOpsScheduleRequestDto, type AzureDevOpsSyncJobSummaryDto } from "../services/azureDevOpsService";
 import {
   reportsService,
   type ReportSectionDto,
@@ -48,8 +48,6 @@ import {
 // ──────────────────────────────────────────────
 type Role = "Administrator" | "Project Manager" | "Executive" | "PMO" | "Scrum Master" | "IT Manager";
 export type EmbeddedDashboardRole = "Administrator" | "Project Manager" | "IT Manager";
-
-type AiChatMessage = { role: "assistant" | "user"; msg: string };
 
 interface EmbeddedDashboardProps {
   embeddedRole?: EmbeddedDashboardRole;
@@ -163,6 +161,42 @@ interface SyncJobRecord {
   errors: number;
 }
 
+const parseUtcDate = (value: string): Date => {
+  const trimmed = value.trim();
+  const isoWithoutZone = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+  const spaceSeparated = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+  if (isoWithoutZone.test(trimmed)) {
+    return new Date(`${trimmed}Z`);
+  }
+
+  if (spaceSeparated.test(trimmed)) {
+    return new Date(`${trimmed.replace(' ', 'T')}Z`);
+  }
+
+  return new Date(trimmed);
+};
+
+const formatToIst = (value: string | null | undefined): string => {
+  if (!value) {
+    return "Never";
+  }
+
+  const date = parseUtcDate(value);
+  const formatted = date.toLocaleString('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+  return `${formatted.replace(',', '')} IST`;
+};
+
 const PROJECT_CATALOG: ProjectRecord[] = PROJECTS.map((p, i) => ({
   ...p,
   projectManager: ["Pradeep Rao", "Hemanth Kumar", "Deepthi Nair", "Sripriya Menon", "Tiru Sharma"][i],
@@ -203,17 +237,31 @@ const toUiStatus = (riskLevel: string | null | undefined, riskScore: number): st
   return "on-track";
 };
 
+const normalizePercent = (value: number | null | undefined): number => Math.max(0, Math.min(100, value ?? 0));
+const normalizeNumber = (value: number | null | undefined): number => Math.max(0, value ?? 0);
+const calculateHealthFromRisk = (riskScore: number): number => Math.max(0, 100 - Math.round(riskScore));
+const calculateBacklogHealthFromRisk = (riskScore: number): number => Math.max(0, 100 - Math.round(riskScore * 0.6));
+const calculateRiskScoreFromMetrics = (completion: number, velocity: number, healthStatus: string): number => {
+  const normalizedHealth = healthStatus.toLowerCase();
+  const baseRisk = completion > 0 ? 100 - completion : 50;
+  const velocityAdjustment = velocity > 0 ? Math.max(0, 10 - velocity) * 0.7 : 8;
+  const healthAdjustment = normalizedHealth === "critical" ? 15 : (normalizedHealth === "at-risk" || normalizedHealth === "at risk") ? 8 : 0;
+  return Math.round(Math.max(0, Math.min(100, baseRisk + velocityAdjustment + healthAdjustment)));
+};
+
 const mapAdminProjectsToCatalog = (items: AdminProjectStatisticItemDto[]): ProjectRecord[] =>
   items.map((project, index) => {
-    const riskScore = Math.max(0, Math.min(100, project.riskScore ?? 0));
-    const completion = Math.max(0, Math.min(100, project.completionRate ?? 0));
-    const velocity = Math.max(0, project.sprintVelocity ?? 0);
+    const completion = normalizePercent(project.completionRate);
+    const velocity = normalizeNumber(project.sprintVelocity);
+    const riskScore = project.riskScore !== null && project.riskScore !== undefined
+      ? normalizePercent(project.riskScore)
+      : calculateRiskScoreFromMetrics(completion, velocity, project.riskLevel ?? "");
 
     return {
       id: project.projectId,
       name: project.projectName,
       code: toProjectCode(project.projectName, project.projectId),
-      health: Math.max(0, 100 - Math.round(riskScore)),
+      health: calculateHealthFromRisk(riskScore),
       status: toUiStatus(project.riskLevel, riskScore),
       team: 0,
       sprint: index + 1,
@@ -221,16 +269,16 @@ const mapAdminProjectsToCatalog = (items: AdminProjectStatisticItemDto[]): Proje
       velocity,
       org: project.visibility,
       budget: "N/A",
-      risk: Math.round(riskScore),
-      projectManager: "Assigned PM",
+      risk: riskScore,
+      projectManager: project.projectManagerName?.trim() ? project.projectManagerName : "Not Assigned",
       businessUnit: project.visibility,
-      defectDensity: project.defectDensity ?? 0,
-      backlogHealth: Math.max(0, 100 - Math.round(riskScore * 0.6)),
+      defectDensity: normalizeNumber(project.defectDensity),
+      backlogHealth: calculateBacklogHealthFromRisk(riskScore),
       releaseStatus: "In Progress",
       overallStatus: project.riskLevel ?? "Healthy",
-      lastSync: new Date(project.lastUpdated).toLocaleString(),
+      lastSync: formatToIst(project.lastUpdated),
       aiHealth: project.riskLevel ?? "Stable",
-      assignedManagerEmail: "",
+      assignedManagerEmail: project.projectManagerEmail?.toLowerCase() ?? "",
       startDate: "",
       targetDate: "",
     };
@@ -238,21 +286,19 @@ const mapAdminProjectsToCatalog = (items: AdminProjectStatisticItemDto[]): Proje
 
 const mapPmProjectsToCatalog = (items: ProjectManagerAssignedProjectDto[], managerEmail: string): ProjectRecord[] =>
   items.map((project, index) => {
-    const completion = Math.max(0, Math.min(100, project.completionRate ?? 0));
-    const velocity = Math.max(0, project.sprintVelocity ?? 0);
-    const riskScore = project.deliveryHealth.toLowerCase() === "critical"
-      ? 85
-      : project.deliveryHealth.toLowerCase() === "at-risk" || project.deliveryHealth.toLowerCase() === "at risk"
-        ? 65
-        : 30;
+    const completion = normalizePercent(project.completionRate);
+    const velocity = normalizeNumber(project.sprintVelocity);
+    const riskScore = project.riskScore !== null && project.riskScore !== undefined
+      ? normalizePercent(project.riskScore)
+      : calculateRiskScoreFromMetrics(completion, velocity, project.deliveryHealth);
 
     return {
       id: project.projectId,
       name: project.projectName,
       code: toProjectCode(project.projectName, project.projectId),
-      health: Math.max(0, 100 - riskScore),
-      status: toUiStatus(project.deliveryHealth, riskScore),
-      team: 0,
+      health: calculateHealthFromRisk(riskScore),
+      status: toUiStatus(project.riskLevel ?? project.deliveryHealth, riskScore),
+      team: 1,
       sprint: index + 1,
       completion,
       velocity,
@@ -262,11 +308,11 @@ const mapPmProjectsToCatalog = (items: ProjectManagerAssignedProjectDto[], manag
       projectManager: project.projectRole,
       businessUnit: project.visibility,
       defectDensity: 0,
-      backlogHealth: Math.max(0, 100 - Math.round(riskScore * 0.7)),
+      backlogHealth: calculateBacklogHealthFromRisk(riskScore),
       releaseStatus: project.deliveryHealth,
-      overallStatus: project.deliveryHealth,
-      lastSync: new Date(project.lastUpdated).toLocaleString(),
-      aiHealth: project.deliveryHealth,
+      overallStatus: project.riskLevel ?? project.deliveryHealth,
+      lastSync: formatToIst(project.lastUpdated),
+      aiHealth: project.riskLevel ?? project.deliveryHealth,
       assignedManagerEmail: managerEmail.toLowerCase(),
       startDate: "",
       targetDate: "",
@@ -277,7 +323,7 @@ const mapItSyncJobs = (items: ItAdminSyncJobDto[]): SyncJobRecord[] =>
   items.map((job) => ({
     org: job.source,
     project: job.scopeName,
-    lastSync: new Date(job.startedAtUtc).toLocaleString(),
+    lastSync: formatToIst(job.startedAtUtc),
     nextSync: job.status.toLowerCase() === "running" ? "In progress" : "Scheduled",
     status: normalizeMonitorStatus(job.status),
     items: job.itemsProcessed,
@@ -562,6 +608,10 @@ const SPRINT_BOARD = {
 
 const AI_CHAT = [
   { role: "assistant", msg: "Hello! I'm Sarathi AI. I can analyze your portfolio, predict delivery risks, generate insights, and answer questions about your projects. How can I help you today?" },
+  { role: "user", msg: "What is the risk status of FinBank Mobile this sprint?" },
+  { role: "assistant", msg: "FinBank Mobile has a **high risk score of 68/100** this sprint. Key concerns:\n\n• Build #147 failed in QA stage (3 test failures in payment module)\n• Sprint 9 velocity (32 pts) is 29% below target (45 pts)\n• 2 critical bugs unresolved (P1 severity)\n• Team capacity at 78% — Michael Chen is blocked on auth module\n\n**AI Recommendation:** Prioritize payment module fixes immediately. Consider pulling in 1-2 story points from backlog and escalating the auth blocker to architecture team." },
+  { role: "user", msg: "Which project has the best delivery health?" },
+  { role: "assistant", msg: "**SmartHR Portal** leads with a delivery health score of **91/100** across all metrics:\n\n• Sprint Completion: 88% (above 85% target)\n• Velocity: 56 pts (8% above target of 52)\n• Defect Density: 0.4/KLoC (excellent)\n• Build Success Rate: 97%\n• Team Utilization: balanced at 78-88%\n\nSmartHR Portal is on track for their Q3 milestone delivery on July 28, 2024. Recommend showcasing their sprint ceremonies as a best-practice model for other teams." },
 ];
 
 // ──────────────────────────────────────────────
@@ -593,16 +643,23 @@ const KPICard = ({ title, value, change, changeType, icon: Icon, color, subtitle
   icon: any; color: string; subtitle?: string;
 }) => (
   <motion.div
-    whileHover={{ y: -3, boxShadow: "0 12px 32px rgba(0,0,0,0.1)" }}
+    whileHover={{ y: -2 }}
     transition={{ duration: 0.2 }}
-    className="bg-white rounded-xl p-5 shadow-sm border border-gray-100 cursor-default"
+    className="bg-white rounded-3xl p-6 border border-gray-100 shadow-sm cursor-default"
   >
-    <div className="flex items-start justify-between mb-4">
-      <div className={`p-2.5 rounded-xl ${color}`}>
-        <Icon size={18} className="text-white" />
+    <div className="flex items-start justify-between gap-5 mb-5">
+      <div>
+        <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-500">{title}</div>
+        <div className="mt-3 text-3xl font-semibold text-gray-900 leading-tight">{value}</div>
       </div>
-      {change && (
-        <span className={`inline-flex items-center gap-0.5 text-xs font-semibold px-2 py-1 rounded-lg ${
+      <div className={`flex items-center justify-center w-16 h-16 rounded-[18px] ${color}`}>
+        <Icon size={24} className="text-white" />
+      </div>
+    </div>
+    {subtitle && <div className="text-sm text-gray-500 mb-3">{subtitle}</div>}
+    {change && (
+      <div className="flex items-center gap-2">
+        <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full ${
           changeType === "up" ? "text-green-700 bg-green-50" :
           changeType === "down" ? "text-red-700 bg-red-50" :
           "text-gray-500 bg-gray-50"
@@ -610,12 +667,36 @@ const KPICard = ({ title, value, change, changeType, icon: Icon, color, subtitle
           {changeType === "up" ? <TrendingUp size={10} /> : changeType === "down" ? <TrendingDown size={10} /> : <Minus size={10} />}
           {change}
         </span>
-      )}
-    </div>
-    <div className="text-2xl font-bold text-gray-900 mb-0.5">{value}</div>
-    <div className="text-sm font-medium text-gray-600">{title}</div>
-    {subtitle && <div className="text-xs text-gray-400 mt-0.5">{subtitle}</div>}
+      </div>
+    )}
   </motion.div>
+);
+
+const CompactKPICard = ({ title, value, change, changeType, icon: Icon, color, subtitle }: {
+  title: string; value: string | number; change?: string; changeType?: "up" | "down" | "stable"; icon: any; color: string; subtitle?: string;
+}) => (
+  <div className="bg-white rounded-xl p-4 border border-gray-100 shadow-sm">
+    <div className="flex items-start justify-between gap-3">
+      <div>
+        <div className="text-[11px] font-semibold text-gray-500">{title}</div>
+        <div className="mt-2 text-xl font-semibold text-gray-900">{value}</div>
+      </div>
+      <div className={`flex items-center justify-center w-14 h-14 rounded-xl ${color}`}>
+        <Icon size={20} className="text-white" />
+      </div>
+    </div>
+    {subtitle && <div className="text-xs text-gray-500 mt-3">{subtitle}</div>}
+    {change && (
+      <div className="mt-3">
+        <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded ${
+          changeType === "up" ? "text-green-700 bg-green-50" : changeType === "down" ? "text-red-700 bg-red-50" : "text-gray-500 bg-gray-50"
+        }`}>
+          {changeType === "up" ? <TrendingUp size={10} /> : changeType === "down" ? <TrendingDown size={10} /> : <Minus size={10} />}
+          {change}
+        </span>
+      </div>
+    )}
+  </div>
 );
 
 const ProgressBar = ({ value, color = "bg-blue-500", height = "h-2" }: { value: number; color?: string; height?: string }) => (
@@ -704,7 +785,7 @@ const Tooltip_ = ({ active, payload, label }: any) => {
   );
 };
 
-const Btn = ({ children, variant = "primary", size = "sm", onClick, className = "", icon: Icon }: any) => {
+const Btn = ({ children, variant = "primary", size = "sm", onClick, className = "", icon: Icon, disabled = false }: any) => {
   const variants = {
     primary: "bg-blue-600 text-white hover:bg-blue-700 shadow-sm",
     secondary: "bg-white text-gray-700 border border-gray-200 hover:bg-gray-50",
@@ -715,7 +796,8 @@ const Btn = ({ children, variant = "primary", size = "sm", onClick, className = 
   return (
     <button
       onClick={onClick}
-      className={`inline-flex items-center gap-1.5 font-medium rounded-lg transition-all ${variants[variant as keyof typeof variants]} ${sizes[size as keyof typeof sizes]} ${className}`}
+      disabled={disabled}
+      className={`inline-flex items-center gap-1.5 font-medium rounded-lg transition-all ${variants[variant as keyof typeof variants]} ${sizes[size as keyof typeof sizes]} ${className} ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
     >
       {Icon && <Icon size={size === "md" ? 15 : 13} />}
       {children}
@@ -851,7 +933,6 @@ const ProjectTable = ({ projects, onOpen, onExport }: { projects: ProjectRecord[
           <select value={unit} onChange={e => setUnit(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-2 text-xs bg-white">
             <option value="all">All units</option>{units.map(u => <option key={u}>{u}</option>)}
           </select>
-          <input type="date" className="border border-gray-200 rounded-lg px-3 py-2 text-xs bg-white" />
         </div>
       </div>
       <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
@@ -1106,7 +1187,7 @@ const NAV_GROUPS = [
 const ROUTE_ACCESS: Record<string, Role[]> = NAV_GROUPS
   .flatMap(group => group.items)
   .reduce((acc, item) => ({ ...acc, [item.id]: item.roles }), {
-    "/notifications": ["Administrator", "Project Manager", "Executive", "PMO", "Scrum Master", "IT Manager"] as Role[],
+    "/notifications": ["Administrator", "Executive", "PMO", "Scrum Master", "IT Manager"] as Role[],
     "/projects/:projectId": ["Administrator", "Project Manager"] as Role[],
     "/delivery-kpis/:projectId": ["Administrator"] as Role[],
   });
@@ -1263,16 +1344,10 @@ const TopNav = ({ currentScreen, role, email, unreadCount, onNavigate, onLogout 
         </div>
       </div>
 
-      {role !== "IT Manager" && (
+      {role !== "Project Manager" && (
         <button onClick={() => onNavigate("/notifications")}
-          className="relative p-2 text-gray-400 hover:text-gray-700 hover:bg-gray-50 rounded-lg transition-colors">
+          className="p-2 text-gray-400 hover:text-gray-700 hover:bg-gray-50 rounded-lg transition-colors">
           <Bell size={17} />
-          {unreadCount > 0 && (
-            <motion.span initial={{ scale: 0 }} animate={{ scale: 1 }}
-              className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-red-500 text-white text-[9px] rounded-full flex items-center justify-center font-bold">
-              {unreadCount}
-            </motion.span>
-          )}
         </button>
       )}
 
@@ -1782,7 +1857,7 @@ const ITAdminDashboard = ({ onNavigate }: { onNavigate: (s: string) => void }) =
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-gray-50">
-                  {["Organization", "Project", "Last Sync", "Next Sync", "Items", "Status", "Action"].map(h => (
+                  {["Organization", "Project", "Last Sync", "Status", "Action"].map(h => (
                     <th key={h} className="text-left px-4 py-3 text-gray-400 font-semibold">{h}</th>
                   ))}
                 </tr>
@@ -1793,8 +1868,6 @@ const ITAdminDashboard = ({ onNavigate }: { onNavigate: (s: string) => void }) =
                     <td className="px-4 py-3 text-gray-500">{job.org}</td>
                     <td className="px-4 py-3 font-medium text-gray-900">{job.project}</td>
                     <td className={`px-4 py-3 ${job.status === "failed" ? "text-red-500 font-semibold" : "text-gray-500"}`}>{job.lastSync}</td>
-                    <td className="px-4 py-3 text-gray-400">{job.nextSync}</td>
-                    <td className="px-4 py-3 font-mono text-gray-700">{job.items || "-"}</td>
                     <td className="px-4 py-3"><StatusBadge status={job.status} /></td>
                     <td className="px-4 py-3">
                       <button onClick={() => triggerSync(i)}
@@ -1889,110 +1962,77 @@ const ITAdminDashboard = ({ onNavigate }: { onNavigate: (s: string) => void }) =
 // ──────────────────────────────────────────────
 // SCREEN: PORTFOLIO DASHBOARD
 // ──────────────────────────────────────────────
-const PortfolioDashboard = ({ onNavigate }: { onNavigate: (s: string) => void }) => (
-  <div className="space-y-6" style={{ fontFamily: "Inter, sans-serif" }}>
-    <div className="flex items-center justify-between">
-      <div>
-        <h2 className="text-xl font-bold text-gray-900">Portfolio Overview</h2>
-        <p className="text-sm text-gray-500">5 projects · 4 organizations · FY2024 Q2</p>
-      </div>
-      <div className="flex gap-2">
-        <Btn variant="secondary" icon={Filter}>Filter</Btn>
-        <Btn variant="primary" icon={Download}>Export</Btn>
-      </div>
-    </div>
+const PortfolioDashboard = ({ onNavigate }: { onNavigate: (s: string) => void }) => {
+  const totalProjects = PROJECTS.length;
+  const activeProjects = PROJECTS.filter(p => p.status === "on-track").length;
+  const completedProjects = 0;
+  const delayedProjects = PROJECTS.filter(p => p.status === "critical").length;
+  const highRiskProjects = PROJECTS.filter(p => p.risk > 60).length;
+  const criticalRiskProjects = PROJECTS.filter(p => p.risk > 80).length;
+  const avgHealth = Math.round(PROJECTS.reduce((sum, p) => sum + p.health, 0) / PROJECTS.length);
+  const orgHealth = 17;
 
-    {/* Project Cards */}
-    <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-      {PROJECTS.map((p, i) => (
-        <motion.div key={p.id} whileHover={{ y: -4 }} transition={{ duration: 0.2 }}
-          onClick={() => onNavigate("project-details")}
-          className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 cursor-pointer hover:border-blue-200 transition-all">
-          <div className="flex items-center justify-between mb-3">
-            <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center">
-              <span className="text-white text-xs font-bold">{p.code}</span>
-            </div>
-            <StatusBadge status={p.status} />
-          </div>
-          <h3 className="text-sm font-bold text-gray-900 mb-0.5 leading-tight">{p.name}</h3>
-          <p className="text-xs text-gray-400 mb-4">{p.org}</p>
-          <div className="mb-3">
-            <div className="flex justify-between text-xs mb-1">
-              <span className="text-gray-500">Health</span>
-              <span className={`font-bold ${p.health >= 80 ? "text-green-600" : p.health >= 60 ? "text-amber-600" : "text-red-600"}`}>{p.health}%</span>
-            </div>
-            <ProgressBar value={p.health} color={p.health >= 80 ? "bg-green-500" : p.health >= 60 ? "bg-amber-500" : "bg-red-500"} />
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <div className="bg-gray-50 rounded-lg p-2">
-              <div className="text-gray-400">Sprint</div>
-              <div className="font-bold text-gray-900">#{p.sprint}</div>
-            </div>
-            <div className="bg-gray-50 rounded-lg p-2">
-              <div className="text-gray-400">Team</div>
-              <div className="font-bold text-gray-900">{p.team} devs</div>
-            </div>
-            <div className="bg-gray-50 rounded-lg p-2">
-              <div className="text-gray-400">Velocity</div>
-              <div className="font-bold text-gray-900">{p.velocity} pts</div>
-            </div>
-            <div className="bg-gray-50 rounded-lg p-2">
-              <div className="text-gray-400">Budget</div>
-              <div className="font-bold text-gray-900">{p.budget}</div>
-            </div>
-          </div>
-        </motion.div>
-      ))}
-    </div>
-
-    {/* KPI Matrix + Trend */}
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-      <Card>
-        <SectionHeader title="Health Matrix" subtitle="Cross-project KPI comparison" />
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-gray-100">
-                {["Project", "Health", "Velocity", "Sprint %", "Defects", "Risk"].map(h => (
-                  <th key={h} className="text-left py-2 pr-3 text-gray-400 font-semibold">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {PROJECTS.map(p => (
-                <tr key={p.id} className="border-b border-gray-50 hover:bg-gray-50">
-                  <td className="py-3 pr-3 font-semibold text-gray-800">{p.code}</td>
-                  <td className="py-3 pr-3">
-                    <span className={`font-bold ${p.health >= 80 ? "text-green-600" : p.health >= 60 ? "text-amber-600" : "text-red-600"}`}>{p.health}%</span>
-                  </td>
-                  <td className="py-3 pr-3 text-gray-700">{p.velocity}</td>
-                  <td className="py-3 pr-3 text-gray-700">{p.completion}%</td>
-                  <td className="py-3 pr-3 text-gray-700">0.{Math.floor(Math.random() * 9 + 1)}</td>
-                  <td className="py-3 pr-3"><StatusBadge status={p.risk > 60 ? "critical" : p.risk > 30 ? "warning" : "success"} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+  return (
+    <div className="space-y-6" style={{ fontFamily: "Inter, sans-serif" }}>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-gray-900">KPI Dashboard</h2>
+          <p className="text-sm text-gray-500">Portfolio-wide key performance indicators from live synchronized data</p>
         </div>
-      </Card>
+        <div className="flex gap-2">
+          <Btn variant="secondary" icon={Filter}>Filter</Btn>
+          <Btn variant="primary" icon={Download}>Export</Btn>
+        </div>
+      </div>
 
-      <Card>
-        <SectionHeader title="Delivery Forecast" subtitle="Predicted completion by Q3 end" />
-        <ResponsiveContainer width="100%" height={200}>
-          <BarChart data={PROJECTS.map(p => ({ name: p.code, forecast: p.completion, target: 85 }))}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-            <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} domain={[0, 100]} />
-            <Tooltip content={<Tooltip_ />} />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Bar key="pf-forecast" dataKey="forecast" name="Forecast %" fill={C.blue} radius={[4, 4, 0, 0]} />
-            <Bar key="pf-target" dataKey="target" name="Target %" fill="#DBEAFE" radius={[4, 4, 0, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </Card>
+      {/* Compact KPI Cards Grid for Administrator */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '16px' }}>
+        <CompactKPICard title="Total Projects" value={totalProjects} change="Portfolio scope" changeType="stable" icon={Briefcase} color="bg-blue-600" />
+        <CompactKPICard title="Active Projects" value={activeProjects} change="Currently running" changeType="stable" icon={PlayCircle} color="bg-green-600" />
+        <CompactKPICard title="Completed Projects" value={completedProjects} change="This quarter" changeType="stable" icon={CheckCircle} color="bg-purple-600" />
+        <CompactKPICard title="Delayed Projects" value={delayedProjects} change="Schedule variance" changeType="down" icon={Clock} color="bg-orange-500" />
+        <CompactKPICard title="High Risk Projects" value={highRiskProjects} change="Needs intervention" changeType="down" icon={AlertTriangle} color="bg-red-600" />
+        <CompactKPICard title="Critical Risk Projects" value={criticalRiskProjects} change="Executive escalation" changeType="down" icon={AlertCircle} color="bg-red-600" />
+        <CompactKPICard title="Overall Delivery Health" value={`${avgHealth}%`} change="Weighted portfolio score" changeType="stable" icon={TrendingUp} color="bg-teal-600" />
+        <CompactKPICard title="Overall Organization Health" value={`${orgHealth}%`} change="Backlog health score" changeType="stable" icon={Zap} color="bg-purple-600" />
+      </div>
+
+      {/* KPI Matrix + Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <Card>
+          <SectionHeader title="Portfolio KPI Summary" subtitle="Delivery health, velocity and sprint completion" />
+          <ResponsiveContainer width="100%" height={250}>
+            <LineChart data={PROJECTS.map((p, i) => ({ name: ["OEC", "R", "S", "SE", "CPM"][i] || p.code, health: p.health, velocity: p.velocity, completion: p.completion }))}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+              <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} domain={[0, 100]} />
+              <Tooltip content={<Tooltip_ />} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Line type="monotone" dataKey="completion" name="Sprint Completion" stroke={C.blue} dot={{ r: 3 }} />
+              <Line type="monotone" dataKey="health" name="Delivery Health" stroke="#10B981" dot={{ r: 3 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        </Card>
+
+        <Card>
+          <SectionHeader title="Overall Organization Health" subtitle="Backlog health and release success trends" />
+          <ResponsiveContainer width="100%" height={250}>
+            <BarChart data={["Completion", "Velocity", "Backlog", "Release"].map((name, i) => ({
+              name,
+              value: [avgHealth, 65, Math.max(0, 100 - avgHealth * 1.2), 75][i]
+            }))}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+              <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} domain={[0, 100]} />
+              <Tooltip content={<Tooltip_ />} />
+              <Bar dataKey="value" fill="#9333EA" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </Card>
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 // ──────────────────────────────────────────────
 // SCREEN: PROJECT DETAILS
@@ -2003,12 +2043,14 @@ const ProjectDetails = ({
   onSyncNow,
   isLoading,
   error,
+  onNavigate,
 }: { 
   projectDetails?: AdminProjectDetailsDto | null;
   azureOrgUrl?: string;
   onSyncNow?: () => Promise<void>;
   isLoading?: boolean;
   error?: string | null;
+  onNavigate?: (s: string) => void;
 }) => {
   const [tab, setTab] = useState("overview");
   const [isSyncing, setIsSyncing] = useState(false);
@@ -2067,6 +2109,22 @@ const ProjectDetails = ({
 
   return (
     <div className="space-y-5" style={{ fontFamily: "Inter, sans-serif" }}>
+      {/* Back button above project data */}
+      <div className="flex items-start">
+        {onNavigate && (
+          <button
+            onClick={() => onNavigate('/projects')}
+            aria-label="Back to Projects"
+            title="Back to Projects"
+            className="group inline-flex items-center rounded-full transition-all duration-500 text-gray-600 p-1"
+          >
+            <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-white group-hover:shadow-md transform transition-all duration-500 group-hover:scale-110">
+              <ChevronLeft size={16} />
+            </span>
+            <span className="ml-2 text-sm font-medium text-gray-700 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-500 whitespace-nowrap"></span>
+          </button>
+        )}
+      </div>
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
         <div className="flex items-start gap-4">
@@ -2074,22 +2132,28 @@ const ProjectDetails = ({
             <span className="text-white font-bold">{projectCode}</span>
           </div>
           <div className="flex-1">
-            <div className="flex items-center gap-3 mb-1">
-              <h1 className="text-xl font-bold text-gray-900">{proj.projectName}</h1>
-              <StatusBadge status={riskStatus} />
+            <div className="flex flex-col gap-2 mb-1">
+              <div className="flex items-center justify-start">
+                {/* Back button moved above project data */}
+              </div>
+              <div className="flex items-center gap-3">
+                <h1 className="text-xl font-bold text-gray-900">{proj.projectName}</h1>
+                <StatusBadge status={riskStatus} />
+              </div>
             </div>
             <div className="flex items-center gap-4 text-xs text-gray-400 flex-wrap">
               <span className="flex items-center gap-1"><Building2 size={11} />{proj.visibility}</span>
               <span className="flex items-center gap-1"><Users size={11} />{proj.teamMembers.length} members</span>
               <span className="flex items-center gap-1"><Target size={11} />{proj.activeSprints} active sprint{proj.activeSprints !== 1 ? 's' : ''}</span>
               <span className="flex items-center gap-1"><Award size={11} />Health: {proj.averageCompletionRate?.toFixed(0) ?? 0}%</span>
-              <span className="flex items-center gap-1"><Clock size={11} />Last sync: {new Date(proj.lastUpdated).toLocaleString()}</span>
+              <span className="flex items-center gap-1"><Clock size={11} />Last sync: {formatToIst(proj.lastUpdated)}</span>
             </div>
           </div>
           <div className="flex gap-2">
             {azureOrgUrl && (
               <Btn variant="secondary" icon={ExternalLink} onClick={handleAzureDevOps}>Azure DevOps</Btn>
             )}
+            {/* Back button moved next to project name (icon-only with tooltip) */}
             {onSyncNow && (
               <Btn variant="primary" icon={RefreshCw} onClick={handleSync} disabled={isSyncing}>
                 {isSyncing ? 'Syncing...' : 'Sync Now'}
@@ -2269,11 +2333,81 @@ const ProjectDetails = ({
           <Card>
             {tab === "repos" ? (
               repositories.length > 0 ? (
-                <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="border-b border-gray-50"><th className="text-left px-5 py-3 text-gray-400">Repository</th><th className="text-left px-5 py-3 text-gray-400">Default branch</th><th className="text-left px-5 py-3 text-gray-400">Size</th></tr></thead><tbody>{repositories.map(repository => <tr key={repository.repositoryId} className="border-b border-gray-50"><td className="px-5 py-3 font-medium">{repository.repositoryName}</td><td className="px-5 py-3 text-gray-600">{repository.defaultBranch || "-"}</td><td className="px-5 py-3 text-gray-600">{repository.size ?? "-"}</td></tr>)}</tbody></table></div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-gray-200 bg-gray-50">
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Repository Name</th>
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Default Branch</th>
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Size (bytes)</th>
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Last Updated</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {repositories.map(repo => (
+                        <tr key={repo.repositoryId} className="border-b border-gray-50 hover:bg-gray-50">
+                          <td className="px-5 py-3 font-medium text-gray-900">{repo.repositoryName}</td>
+                          <td className="px-5 py-3 text-gray-600">{repo.defaultBranch || "-"}</td>
+                          <td className="px-5 py-3 text-gray-600">{repo.size ? (repo.size / (1024 * 1024)).toFixed(2) + " MB" : "-"}</td>
+                          <td className="px-5 py-3 text-gray-600">{repo.lastUpdatedUtc ? new Date(repo.lastUpdatedUtc).toLocaleDateString() : "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               ) : <div className="p-12 text-center text-gray-500">No repositories found</div>
             ) : (
               builds.length > 0 ? (
-                <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="border-b border-gray-50"><th className="text-left px-5 py-3 text-gray-400">Pipeline</th><th className="text-left px-5 py-3 text-gray-400">Build</th><th className="text-left px-5 py-3 text-gray-400">Status</th><th className="text-left px-5 py-3 text-gray-400">Result</th></tr></thead><tbody>{builds.map(build => <tr key={build.buildId} className="border-b border-gray-50"><td className="px-5 py-3 font-medium">{build.definitionName}</td><td className="px-5 py-3 text-gray-600">{build.buildNumber}</td><td className="px-5 py-3 text-gray-600">{build.status}</td><td className="px-5 py-3 text-gray-600">{build.result || "-"}</td></tr>)}</tbody></table></div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-gray-200 bg-gray-50">
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Pipeline Name</th>
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Latest Run</th>
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Status</th>
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Branch</th>
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Trigger Type</th>
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Duration</th>
+                        <th className="text-left px-5 py-3 text-gray-600 font-semibold">Result</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {builds.map(build => {
+                        const duration = build.finishTime && build.startTime
+                          ? Math.round((new Date(build.finishTime).getTime() - new Date(build.startTime).getTime()) / 1000)
+                          : null;
+                        const durationStr = duration !== null ? `${Math.floor(duration / 60)}m ${duration % 60}s` : "-";
+                        return (
+                          <tr key={build.buildId} className="border-b border-gray-50 hover:bg-gray-50">
+                            <td className="px-5 py-3 font-medium text-gray-900">{build.definitionName}</td>
+                            <td className="px-5 py-3 text-gray-600">{build.buildNumber}</td>
+                            <td className="px-5 py-3">
+                              <span className={`px-2 py-1 rounded text-xs font-medium ${
+                                build.status.toLowerCase() === 'completed' ? 'bg-blue-100 text-blue-800' :
+                                build.status.toLowerCase() === 'inprogress' ? 'bg-yellow-100 text-yellow-800' :
+                                'bg-gray-100 text-gray-800'
+                              }`}>
+                                {build.status}
+                              </span>
+                            </td>
+                            <td className="px-5 py-3 text-gray-600 truncate" title={build.sourceBranch}>{build.sourceBranch || "-"}</td>
+                            <td className="px-5 py-3 text-gray-600">{build.triggerType || "-"}</td>
+                            <td className="px-5 py-3 text-gray-600">{durationStr}</td>
+                            <td className="px-5 py-3">
+                              <span className={`px-2 py-1 rounded text-xs font-medium ${
+                                build.result?.toLowerCase() === 'succeeded' ? 'bg-green-100 text-green-800' :
+                                build.result?.toLowerCase() === 'failed' ? 'bg-red-100 text-red-800' :
+                                'bg-gray-100 text-gray-800'
+                              }`}>
+                                {build.result || "-"}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               ) : <div className="p-12 text-center text-gray-500">No pipeline builds found</div>
             )}
           </Card>
@@ -2294,6 +2428,7 @@ const SprintGovernance = ({
   projects = [],
   selectedProjectId = null,
   onProjectSelect,
+  showProjectSelector = false,
 }: {
   reportsOverview?: ReportsOverviewDto | null;
   pmSprintProgress?: ProjectManagerSprintProgressDto | null;
@@ -2302,7 +2437,11 @@ const SprintGovernance = ({
   projects?: ProjectRecord[];
   selectedProjectId?: number | null;
   onProjectSelect?: (projectId: number) => void;
+  showProjectSelector?: boolean;
 }) => {
+  const [showFilterModal, setShowFilterModal] = useState(false);
+  const [filterByPriority, setFilterByPriority] = useState<string[]>(["critical", "high", "medium", "low"]);
+  
   const sprintSection = findSection(reportsOverview, "sprints");
 
   const priorityColor = { critical: "bg-red-100 text-red-700", high: "bg-amber-100 text-amber-700", medium: "bg-blue-100 text-blue-700", low: "bg-gray-100 text-gray-500" };
@@ -2394,10 +2533,10 @@ const SprintGovernance = ({
   })();
 
   const columns = [
-    { id: "todo", label: "To Do", color: "border-gray-200 bg-gray-50", items: mappedBoard.todo },
-    { id: "inProgress", label: "In Progress", color: "border-blue-200 bg-blue-50/40", items: mappedBoard.inProgress },
-    { id: "review", label: "In Review", color: "border-amber-200 bg-amber-50/40", items: mappedBoard.review },
-    { id: "done", label: "Done", color: "border-green-200 bg-green-50/40", items: mappedBoard.done },
+    { id: "todo", label: "To Do", color: "border-gray-200 bg-gray-50", items: mappedBoard.todo.filter(item => filterByPriority.includes(item.priority)) },
+    { id: "inProgress", label: "In Progress", color: "border-blue-200 bg-blue-50/40", items: mappedBoard.inProgress.filter(item => filterByPriority.includes(item.priority)) },
+    { id: "review", label: "In Review", color: "border-amber-200 bg-amber-50/40", items: mappedBoard.review.filter(item => filterByPriority.includes(item.priority)) },
+    { id: "done", label: "Done", color: "border-green-200 bg-green-50/40", items: mappedBoard.done.filter(item => filterByPriority.includes(item.priority)) },
   ];
 
   const activeSprint = (() => {
@@ -2460,18 +2599,25 @@ const SprintGovernance = ({
     ?? sprintSection?.rows[0]?.cells["Sprint"]
     ?? "Sprint 14";
 
+  const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0] ?? null;
+
   return (
-    <div className="space-y-5" style={{ fontFamily: "Inter, sans-serif" }}>
-      {onProjectSelect && projects.length > 0 && (
+    <div className="space-y-4" style={{ fontFamily: "Inter, sans-serif" }}>
+      {showProjectSelector && onProjectSelect && projects.length > 0 ? (
         <div className="flex items-center gap-3">
           <label className="text-sm font-semibold text-gray-700" htmlFor="sprint-project">Project</label>
           <select id="sprint-project" value={selectedProjectId ?? ""} onChange={(event) => onProjectSelect(Number(event.target.value))} className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700">
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
         </div>
-      )}
-      {/* Header KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      ) : selectedProject ? (
+        <div className="rounded-2xl border border-gray-200 bg-white px-4 py-3">
+          <div className="text-xs text-gray-500 uppercase tracking-[0.24em]">Assigned Project</div>
+          <div className="mt-1 text-lg font-semibold text-gray-900">{selectedProject.name}</div>
+        </div>
+      ) : null}
+      {/* Header KPIs - responsive 1x4 Layout */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <KPICard title="Sprint Health" value={`${sprintHealth.toFixed(1)}%`} change="Live" changeType="up" icon={Activity} color="bg-blue-600" subtitle={sprintSubtitle} />
         <KPICard title="Capacity Used" value={`${capacityUsed.toFixed(1)}%`} change="Live" changeType="up" icon={Gauge} color="bg-green-600" subtitle={adminGovernance ? `${adminGovernance.completedStoryPoints} / ${adminGovernance.plannedStoryPoints} story points` : activeSprint ? `${activeSprint.completedStoryPoints} / ${activeSprint.plannedStoryPoints} story points` : "41 / 50 story points"} />
         <KPICard title="Completed Items" value={String(completedItems)} change="Live" changeType="stable" icon={CheckCircle} color="bg-indigo-500" subtitle={adminGovernance ? `of ${adminGovernance.plannedItems} planned` : activeSprint ? `of ${activeSprint.totalWorkItems} planned` : "of 15 planned"} />
@@ -2483,33 +2629,64 @@ const SprintGovernance = ({
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-gray-900">Sprint Board <span className="text-sm text-gray-400 font-normal">· {sprintSubtitle}</span></h2>
           <div className="flex gap-2">
-            <Btn variant="secondary" icon={Filter}>Filter</Btn>
-            <Btn variant="primary" icon={Plus}>Add Story</Btn>
+            <Btn variant="secondary" icon={Filter} onClick={() => setShowFilterModal(!showFilterModal)}>Filter</Btn>
           </div>
         </div>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+
+        {/* Filter Panel */}
+        {showFilterModal && (
+          <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-700">Filter by Priority</h3>
+              <button onClick={() => setShowFilterModal(false)} className="text-gray-500 hover:text-gray-700">✕</button>
+            </div>
+            <div className="flex gap-3">
+              {["critical", "high", "medium", "low"].map((priority) => (
+                <label key={priority} className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={filterByPriority.includes(priority)}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setFilterByPriority([...filterByPriority, priority]);
+                      } else {
+                        setFilterByPriority(filterByPriority.filter(p => p !== priority));
+                      }
+                    }}
+                    className="w-4 h-4 rounded border-gray-300"
+                  />
+                  <span className="text-sm text-gray-700 capitalize">{priority}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
           {columns.map(col => (
-            <div key={col.id} className={`border rounded-xl ${col.color} p-3`}>
-              <div className="flex items-center justify-between mb-3">
+            <div key={col.id} className={`border rounded-xl ${col.color} p-2 flex flex-col h-[300px] max-h-[300px] min-h-0 overflow-hidden`}>
+              <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-bold text-gray-700">{col.label}</span>
                 <span className="text-xs font-bold text-gray-500 bg-white rounded-full w-5 h-5 flex items-center justify-center shadow-sm">{col.items.length}</span>
               </div>
-              <div className="space-y-2.5">
-                {col.items.map(item => (
-                  <motion.div key={item.id} whileHover={{ scale: 1.02 }}
-                    className="bg-white rounded-lg p-3 shadow-sm border border-gray-100 cursor-pointer">
-                    <p className="text-xs text-gray-700 font-medium mb-2 leading-relaxed">{item.title}</p>
-                    <div className="flex items-center justify-between">
-                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${priorityColor[item.priority as keyof typeof priorityColor]}`}>
-                        {item.priority}
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        <Avatar initials={item.assignee} size="xs" colorIdx={item.assignee.charCodeAt(0)} />
-                        <span className="text-[10px] bg-blue-50 text-blue-600 font-bold px-1.5 py-0.5 rounded">{item.points}pt</span>
+              <div className="overflow-y-auto flex-1 min-h-0 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent">
+                <div className="space-y-1">
+                  {col.items.map(item => (
+                    <motion.div key={item.id} whileHover={{ scale: 1.02 }}
+                      className="bg-white rounded-lg px-2 py-1.5 shadow-sm border border-gray-100 cursor-pointer hover:shadow-md transition-shadow h-[56px] max-h-[56px] flex flex-col justify-between overflow-hidden">
+                      <p className="text-xs text-gray-700 font-medium leading-snug overflow-hidden text-ellipsis" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{item.title}</p>
+                      <div className="flex items-center justify-between mt-auto text-[11px]">
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${priorityColor[item.priority as keyof typeof priorityColor]}`}>
+                          {item.priority}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <Avatar initials={item.assignee} size="xs" colorIdx={item.assignee.charCodeAt(0)} />
+                          <span className="text-[10px] bg-blue-50 text-blue-600 font-bold px-2 py-0.5 rounded">{item.points}pt</span>
+                        </div>
                       </div>
-                    </div>
-                  </motion.div>
-                ))}
+                    </motion.div>
+                  ))}
+                </div>
               </div>
             </div>
           ))}
@@ -2520,7 +2697,7 @@ const SprintGovernance = ({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <Card>
           <SectionHeader title="Sprint Burndown" subtitle="Remaining work vs ideal" />
-          <ResponsiveContainer width="100%" height={200}>
+          <ResponsiveContainer width="100%" height={170}>
             <LineChart data={burndownData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
               <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} />
@@ -2534,7 +2711,7 @@ const SprintGovernance = ({
         </Card>
         <Card>
           <SectionHeader title="Velocity Trend" subtitle="5-sprint comparison" />
-          <ResponsiveContainer width="100%" height={200}>
+          <ResponsiveContainer width="100%" height={170}>
             <BarChart data={sprintTrendData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
               <XAxis dataKey="sprint" tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} />
@@ -2579,10 +2756,12 @@ const KPIDashboard = ({
     ? adminProjects.find((project) => project.id === selectedProjectId) ?? adminProjects[0] ?? null
     : null;
 
-  const buildSuccessRate = useMemo(
-    () => getBuildSuccessRate(selectedProjectDetails?.builds),
-    [selectedProjectDetails],
-  );
+  const buildSuccessRate = useMemo(() => {
+    if (!isAdministrator) {
+      return pmKpis?.averageReleaseSuccessRate ?? 0;
+    }
+    return getBuildSuccessRate(selectedProjectDetails?.builds);
+  }, [isAdministrator, pmKpis, selectedProjectDetails]);
 
   const buildSuccessByLabel = useMemo(() => {
     const groups = new Map<string, { total: number; successful: number }>();
@@ -2635,6 +2814,9 @@ const KPIDashboard = ({
   const avgDefectDensity = pmKpis?.averageDefectDensity ?? findSummaryValue(kpiSection, "defect density");
   const avgBacklogHealth = pmKpis?.averageBacklogHealth ?? findSummaryValue(kpiSection, "backlog health");
   const avgReleaseSuccess = pmKpis?.averageReleaseSuccessRate ?? findSummaryValue(kpiSection, "release success");
+  const portfolioRisk = projects.length ? Math.round(projects.reduce((acc, project) => acc + project.risk, 0) / projects.length) : 0;
+  const pmActiveSprints = pmKpis ? Math.max(0, pmKpis.completionTrend.length) : projects.length;
+  const pmTeamMembers = projects.length;
 
   const projectTrendData = useMemo(() => {
     const sprints = selectedProjectDetails?.sprints ?? [];
@@ -2660,6 +2842,25 @@ const KPIDashboard = ({
         };
       });
   }, [avgDefectDensity, buildSuccessRate, selectedProjectDetails]);
+
+  const fallbackSummaryValue = (labelFragment: string) =>
+    pmKpis ? 0 : findSummaryValue(kpiSection, labelFragment);
+
+  const activeSprints = isAdministrator
+    ? selectedProjectDetails?.activeSprints ?? 0
+    : pmKpis
+      ? Math.max(0, pmKpis.completionTrend.length)
+      : Math.max(0, fallbackSummaryValue("active sprint"));
+
+  const teamMembers = isAdministrator
+    ? selectedProjectDetails?.teamMembers.length ?? 0
+    : Math.max(0, fallbackSummaryValue("team")) || projects.length;
+
+  const riskScore = isAdministrator
+    ? Math.round(selectedProjectDetails?.riskScore ?? 0)
+    : pmKpis
+      ? Math.round(projects.length ? projects.reduce((acc, project) => acc + project.risk, 0) / projects.length : 0)
+      : Math.max(0, fallbackSummaryValue("risk score"));
 
   const kpiTrendData = (() => {
     if (pmKpis && pmKpis.completionTrend.length > 0) {
@@ -2695,20 +2896,18 @@ const KPIDashboard = ({
     return KPI_TREND;
   })();
 
-  const activeSprints = selectedProjectDetails?.activeSprints ?? 0;
-  const teamMembers = selectedProjectDetails?.teamMembers.length ?? 0;
-  const blockedItems = selectedProjectDetails?.workItems.filter((item) => item.isBlocked || item.state.toLowerCase() === "blocked").length ?? 0;
-  const riskScore = Math.round(selectedProjectDetails?.riskScore ?? 0);
+  const blockedItems = isAdministrator ? selectedProjectDetails?.workItems.filter((item) => item.isBlocked || item.state.toLowerCase() === "blocked").length ?? 0 : 0;
 
   const handleExport = () => {
-    if (!selectedAdminProject || !selectedProjectDetails || !kpiSection) {
+    if (!isAdministrator && !pmKpis) {
       return;
     }
 
     const summarySheet = XLSX.utils.json_to_sheet([
-      { Metric: "Project", Value: selectedProjectDetails.projectName },
-      { Metric: "Project Code", Value: selectedAdminProject.code },
-      { Metric: "Visibility", Value: selectedProjectDetails.visibility },
+      { Metric: "Report", Value: isAdministrator ? "Delivery KPIs" : "Project Manager KPI Dashboard" },
+      { Metric: "Scope", Value: isAdministrator ? selectedAdminProject?.name ?? "Unknown project" : "Assigned projects" },
+      ...(isAdministrator && selectedAdminProject ? [{ Metric: "Project Code", Value: selectedAdminProject.code }] : []),
+      ...(isAdministrator && selectedProjectDetails ? [{ Metric: "Visibility", Value: selectedProjectDetails.visibility }] : []),
       { Metric: "Sprint Completion Rate", Value: `${avgCompletion.toFixed(1)}%` },
       { Metric: "Team Velocity", Value: `${avgVelocity.toFixed(2)} pts` },
       { Metric: "Defect Density", Value: avgDefectDensity.toFixed(2) },
@@ -2718,6 +2917,7 @@ const KPIDashboard = ({
       { Metric: "Blocked Work Items", Value: blockedItems },
       { Metric: "Build Success", Value: `${buildSuccessRate.toFixed(1)}%` },
       { Metric: "Release Success", Value: `${avgReleaseSuccess.toFixed(1)}%` },
+      ...(pmKpis ? [{ Metric: "Generated At", Value: new Date(pmKpis.generatedAtUtc).toLocaleString() }] : []),
     ]);
 
     const trendSheet = XLSX.utils.json_to_sheet(
@@ -2730,37 +2930,46 @@ const KPIDashboard = ({
       })),
     );
 
-    const sprintSheet = XLSX.utils.json_to_sheet(
-      selectedProjectDetails.sprints.map((sprint) => ({
-        Sprint: sprint.sprintName,
-        Status: sprint.status,
-        StartDate: sprint.startDate,
-        EndDate: sprint.endDate,
-        PlannedStoryPoints: sprint.plannedStoryPoints,
-        CompletedStoryPoints: sprint.completedStoryPoints,
-        TotalWorkItems: sprint.totalWorkItems,
-        CompletedWorkItems: sprint.completedWorkItems,
-      })),
-    );
-
-    const buildSheet = XLSX.utils.json_to_sheet(
-      selectedProjectDetails.builds.map((build) => ({
-        Definition: build.definitionName,
-        BuildNumber: build.buildNumber,
-        Status: build.status,
-        Result: build.result ?? "-",
-        SourceBranch: build.sourceBranch,
-        StartTime: build.startTime,
-        FinishTime: build.finishTime ?? "-",
-      })),
-    );
-
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
     XLSX.utils.book_append_sheet(workbook, trendSheet, "KPI Trends");
-    XLSX.utils.book_append_sheet(workbook, sprintSheet, "Sprints");
-    XLSX.utils.book_append_sheet(workbook, buildSheet, "Builds");
-    XLSX.writeFile(workbook, `Sarathi-${selectedAdminProject.code}-Delivery-KPIs-${new Date().toISOString().split("T")[0]}.xlsx`);
+
+    if (isAdministrator && selectedProjectDetails?.sprints?.length) {
+      const sprintSheet = XLSX.utils.json_to_sheet(
+        selectedProjectDetails.sprints.map((sprint) => ({
+          Sprint: sprint.sprintName,
+          Status: sprint.status,
+          StartDate: sprint.startDate,
+          EndDate: sprint.endDate,
+          PlannedStoryPoints: sprint.plannedStoryPoints,
+          CompletedStoryPoints: sprint.completedStoryPoints,
+          TotalWorkItems: sprint.totalWorkItems,
+          CompletedWorkItems: sprint.completedWorkItems,
+        })),
+      );
+      XLSX.utils.book_append_sheet(workbook, sprintSheet, "Sprints");
+    }
+
+    if (isAdministrator && selectedProjectDetails?.builds?.length) {
+      const buildSheet = XLSX.utils.json_to_sheet(
+        selectedProjectDetails.builds.map((build) => ({
+          Definition: build.definitionName,
+          BuildNumber: build.buildNumber,
+          Status: build.status,
+          Result: build.result ?? "-",
+          SourceBranch: build.sourceBranch,
+          StartTime: build.startTime,
+          FinishTime: build.finishTime ?? "-",
+        })),
+      );
+      XLSX.utils.book_append_sheet(workbook, buildSheet, "Builds");
+    }
+
+    const fileName = isAdministrator
+      ? `Sarathi-${selectedAdminProject?.code ?? "Delivery"}-Delivery-KPIs-${new Date().toISOString().split("T")[0]}.xlsx`
+      : `Sarathi-PM-Delivery-KPIs-${new Date().toISOString().split("T")[0]}.xlsx`;
+
+    XLSX.writeFile(workbook, fileName);
   };
 
   return (
@@ -2837,11 +3046,17 @@ const KPIDashboard = ({
 // ──────────────────────────────────────────────
 // SCREEN: AI RISK ANALYSIS
 // ──────────────────────────────────────────────
-const AIRiskAnalysis = ({ projects = [], reportsOverview = null, projectScopeLabel = "projects" }: { projects?: ProjectRecord[]; reportsOverview?: ReportsOverviewDto | null; projectScopeLabel?: string }) => {
+const AIRiskAnalysis = ({ projects = [], reportsOverview = null, projectScopeLabel = "projects", onRefresh, showProjectSelector = true }: { projects?: ProjectRecord[]; reportsOverview?: ReportsOverviewDto | null; projectScopeLabel?: string; onRefresh?: (projectId?: number) => Promise<void>; showProjectSelector?: boolean }) => {
   const [selectedProjectId, setSelectedProjectId] = useState<number | "all">("all");
   useEffect(() => {
-    if (selectedProjectId !== "all" && !projects.some((project) => project.id === selectedProjectId)) setSelectedProjectId("all");
-  }, [projects, selectedProjectId]);
+    if (showProjectSelector) {
+      if (selectedProjectId !== "all" && !projects.some((project) => project.id === selectedProjectId)) setSelectedProjectId("all");
+    } else {
+      if (projects.length > 0 && (selectedProjectId === "all" || !projects.some((project) => project.id === selectedProjectId))) {
+        setSelectedProjectId(projects[0].id);
+      }
+    }
+  }, [projects, selectedProjectId, showProjectSelector]);
   const scopedProjects = selectedProjectId === "all" ? projects : projects.filter((project) => project.id === selectedProjectId);
   const selectedProject = selectedProjectId === "all" ? null : scopedProjects[0] ?? null;
   const portfolioSection = findSection(reportsOverview, "portfolio");
@@ -2883,6 +3098,82 @@ const AIRiskAnalysis = ({ projects = [], reportsOverview = null, projectScopeLab
     : RISK_TREND;
 
   const topRiskProjects = [...scopedProjects].sort((a, b) => b.risk - a.risk).slice(0, 4);
+  const [aiAnalysis, setAiAnalysis] = useState<ProjectManagerAiAnalysisDto | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    if (!selectedProject?.id) {
+      setAiAnalysis(null);
+      return;
+    }
+
+    projectManagerService.getAiAnalysis(selectedProject.id)
+      .then((data) => { if (!disposed) setAiAnalysis(data); })
+      .catch(() => { if (!disposed) setAiAnalysis(null); });
+
+    return () => { disposed = true; };
+  }, [selectedProject?.id]);
+
+  const selectedProjectRisk = selectedProject
+    ? selectedProject.risk
+    : overallRisk;
+
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [showRefreshed, setShowRefreshed] = useState(false);
+
+  const handleRefresh = async () => {
+    if (!onRefresh) return;
+    setIsRefreshing(true);
+    try {
+      await onRefresh(selectedProjectId === "all" ? undefined : selectedProjectId);
+      setShowRefreshed(true);
+      window.setTimeout(() => setShowRefreshed(false), 3000);
+    } catch (e) {
+      // lightweight feedback
+      // eslint-disable-next-line no-console
+      console.error('Refresh analysis failed', e);
+      window.alert('Unable to refresh analysis.');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+  const handleExport = async () => {
+    setIsExporting(true);
+    try {
+      // Load the overview and build CSV client-side so we can filter by selected project reliably
+      const overview = await reportsService.getOverview(selectedProjectId === 'all' ? undefined : (selectedProjectId as number));
+      const section = overview.sections.find(s => s.key === 'portfolio') ?? overview.sections[0];
+
+      // If a project is selected, filter rows to that project name
+      let rows = section.rows;
+      if (selectedProjectId !== 'all') {
+        const pid = selectedProjectId as number;
+        const project = projects.find(p => p.id === pid);
+        if (project) {
+          rows = rows.filter(r => (r.cells['Project'] ?? '') === project.name);
+        }
+      }
+
+      const csvHeader = section.columns.map(c => `"${c.replace(/"/g, '""')}"`).join(',');
+      const csvLines = rows.map(row => section.columns.map(col => `"${(row.cells[col] ?? '').toString().replace(/\r/g, ' ').replace(/\n/g, ' ').replace(/"/g, '""')}"`).join(','));
+      const csv = [csvHeader, ...csvLines].join('\n');
+
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `sarathi-portfolio-report-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+      anchor.click();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('Export failed', e);
+      window.alert('Unable to export report.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   return (
     <div className="space-y-6" style={{ fontFamily: "Inter, sans-serif" }}>
@@ -2892,12 +3183,23 @@ const AIRiskAnalysis = ({ projects = [], reportsOverview = null, projectScopeLab
           <p className="text-sm text-gray-500">Predictive risk scoring across portfolio — powered by Sarathi AI</p>
         </div>
         <div className="flex gap-2">
-          <select value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value === "all" ? "all" : Number(event.target.value))} className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700">
-            <option value="all">All visible {projectScopeLabel}</option>
-            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
-          <Btn variant="secondary" icon={Download}>Risk Report</Btn>
-          <Btn variant="primary" icon={RefreshCw}>Refresh Analysis</Btn>
+          {showProjectSelector ? (
+            <select value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value === "all" ? "all" : Number(event.target.value))} className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700">
+              <option value="all">All visible {projectScopeLabel}</option>
+              {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+          ) : (
+            <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700">
+              {selectedProject ? selectedProject.name : `No assigned ${projectScopeLabel}`}
+            </div>
+          )}
+          <Btn variant="secondary" icon={Download} onClick={handleExport} disabled={isExporting}>{isExporting ? 'Exporting...' : 'Risk Report'}</Btn>
+          <Btn variant="primary" icon={RefreshCw} onClick={handleRefresh} disabled={isRefreshing}>{isRefreshing ? 'Refreshing...' : 'Refresh Analysis'}</Btn>
+          {showRefreshed && (
+            <div className="ml-2 inline-flex items-center rounded-full bg-green-50 text-green-700 text-xs font-semibold px-2 py-1">
+              Refreshed
+            </div>
+          )}
         </div>
       </div>
 
@@ -2906,12 +3208,12 @@ const AIRiskAnalysis = ({ projects = [], reportsOverview = null, projectScopeLab
         <Card className="flex flex-col justify-center py-6">
           <div className="text-sm font-semibold text-gray-600 mb-2">{selectedProject ? "Project Risk Score" : "Visible Portfolio Risk"}</div>
           <div className="flex items-end justify-between gap-4">
-            <div><span className="text-5xl font-black text-gray-900">{overallRisk}</span><span className="ml-1 text-sm text-gray-400">/ 100</span></div>
-            <StatusBadge status={overallRisk > 70 ? "critical" : overallRisk > 40 ? "warning" : "success"} />
+            <div><span className="text-5xl font-black text-gray-900">{selectedProjectRisk}</span><span className="ml-1 text-sm text-gray-400">/ 100</span></div>
+            <StatusBadge status={selectedProjectRisk > 70 ? "critical" : selectedProjectRisk > 40 ? "warning" : "success"} />
           </div>
-          <ProgressBar value={overallRisk} color={overallRisk > 70 ? "bg-red-500" : overallRisk > 40 ? "bg-amber-500" : "bg-green-500"} height="h-3" />
-          <div className={`mt-3 text-sm font-bold ${overallRisk > 70 ? "text-red-600" : overallRisk > 40 ? "text-amber-600" : "text-green-600"}`}>
-            {overallRisk > 70 ? "High Risk" : overallRisk > 40 ? "Moderate Risk" : "Low Risk"}
+          <ProgressBar value={selectedProjectRisk} color={selectedProjectRisk > 70 ? "bg-red-500" : selectedProjectRisk > 40 ? "bg-amber-500" : "bg-green-500"} height="h-3" />
+          <div className={`mt-3 text-sm font-bold ${selectedProjectRisk > 70 ? "text-red-600" : selectedProjectRisk > 40 ? "text-amber-600" : "text-green-600"}`}>
+            {selectedProjectRisk > 70 ? "High Risk" : selectedProjectRisk > 40 ? "Moderate Risk" : "Low Risk"}
           </div>
           <p className="text-xs text-gray-400 mt-1">{selectedProject ? `${selectedProject.completion.toFixed(1)}% completion · ${selectedProject.velocity.toFixed(1)} velocity` : `${highRiskCount} high-risk projects contributing to portfolio risk`}</p>
         </Card>
@@ -2970,25 +3272,6 @@ const AIRiskAnalysis = ({ projects = [], reportsOverview = null, projectScopeLab
           </ResponsiveContainer>
         </Card>
       </div>
-
-      {/* AI Mitigation Cards */}
-      <div>
-        <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-          <Sparkles size={16} className="text-purple-500" />
-          AI Mitigation Recommendations
-        </h3>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {topRiskProjects.map((project, index) => (
-            <AIInsightCard
-              key={project.id}
-              type={project.risk >= 75 ? "critical" : project.risk >= 50 ? "warning" : "success"}
-              title={`${project.name}: ${project.risk >= 75 ? "Escalate immediately" : project.risk >= 50 ? "Mitigation required" : "Stable trajectory"}`}
-              insight={`Current risk ${project.risk}/100 with completion ${project.completion.toFixed(1)}% and velocity ${project.velocity.toFixed(2)}. Focus on blocked work and release readiness for sustained delivery health.`}
-              action={index < 2 ? "Review action plan" : undefined}
-            />
-          ))}
-        </div>
-      </div>
     </div>
   );
 };
@@ -2997,8 +3280,14 @@ const AIRiskAnalysis = ({ projects = [], reportsOverview = null, projectScopeLab
 // SCREEN: AI EXECUTIVE REPORTS
 // ──────────────────────────────────────────────
 const AIExecutiveReports = ({ projects = [], reportsOverview = null, isAdministrator = false }: { projects?: ProjectRecord[]; reportsOverview?: ReportsOverviewDto | null; isAdministrator?: boolean }) => {
+  const pageTitle = isAdministrator ? "Executive Reports" : "Reports";
+  const pageSubtitle = isAdministrator
+    ? "Live executive summaries sourced from synchronized project, sprint, work-item, and KPI data."
+    : "Executive-ready portfolio, sprint, work item, and KPI reports with export-ready data views.";
+
   const [generating, setGenerating] = useState(false);
   const [generated, setGenerated] = useState(true);
+  const [emailing, setEmailing] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(projects[0]?.id ?? null);
   const [aiAnalysis, setAiAnalysis] = useState<ProjectManagerAiAnalysisDto | null>(null);
   const [selectedReportsOverview, setSelectedReportsOverview] = useState<ReportsOverviewDto | null>(reportsOverview);
@@ -3107,59 +3396,93 @@ const AIExecutiveReports = ({ projects = [], reportsOverview = null, isAdministr
       return;
     }
 
-    const printWindow = window.open("", "_blank", "noopener,noreferrer,width=1024,height=768");
-    if (!printWindow) {
+    const cleanPdfText = (value: string) => value
+      .replace(/[^\x20-\x7E]/g, "?")
+      .replace(/\\/g, "\\\\")
+      .replace(/\(/g, "\\(")
+      .replace(/\)/g, "\\)");
+    const wrap = (value: string) => value.match(/.{1,92}(?:\s|$)/g) ?? [value];
+    const lines = [
+      "Sarathi Executive Report",
+      selectedProject.name,
+      `Generated: ${new Date(selectedReportsOverview.generatedAtUtc).toLocaleString()}`,
+      "",
+      ...selectedReportsOverview.sections.flatMap((section) => [
+        section.title,
+        ...wrap(section.description),
+        ...section.rows.flatMap((row) => wrap(section.columns.map((column) => `${column}: ${row.cells[column] ?? "-"}`).join(" | "))),
+        "",
+      ]),
+    ];
+    const pages = Array.from({ length: Math.max(1, Math.ceil(lines.length / 46)) }, (_, index) => lines.slice(index * 46, index * 46 + 46));
+    const objects: string[] = [];
+    const pageIds = pages.map((_, index) => 4 + index * 2);
+    objects.push("<< /Type /Catalog /Pages 2 0 R >>");
+    objects.push(`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`);
+    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+    pages.forEach((page, index) => {
+      const pageId = pageIds[index];
+      const contentId = pageId + 1;
+      const text = page.map((line, lineIndex) => `${lineIndex === 0 ? "" : "T*\n"}(${cleanPdfText(line)}) Tj`).join("\n");
+      const stream = `BT\n/F1 10 Tf\n50 750 Td\n14 TL\n${text}\nET`;
+      objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`);
+      objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+    });
+    let pdf = "%PDF-1.4\n";
+    const offsets = [0];
+    objects.forEach((object, index) => {
+      offsets.push(pdf.length);
+      pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+    });
+    const xrefOffset = pdf.length;
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n `).join("\n")}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+    const url = URL.createObjectURL(new Blob([pdf], { type: "application/pdf" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `Sarathi-${selectedProject.code}-Executive-Report-${new Date().toISOString().split("T")[0]}.pdf`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleEmailStakeholders = async () => {
+    if (!selectedProject) {
       return;
     }
 
-    const sectionsHtml = selectedReportsOverview.sections.map((section) => `
-      <section style="margin: 0 0 24px 0; page-break-inside: avoid;">
-        <h2 style="font-size: 18px; margin: 0 0 8px 0;">${section.title}</h2>
-        <p style="margin: 0 0 12px 0; color: #475569;">${section.description}</p>
-        <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
-          <thead>
-            <tr>
-              ${section.columns.map((column) => `<th style="border: 1px solid #cbd5e1; padding: 8px; text-align: left; background: #f8fafc;">${column}</th>`).join("")}
-            </tr>
-          </thead>
-          <tbody>
-            ${section.rows.map((row) => `
-              <tr>
-                ${section.columns.map((column) => `<td style="border: 1px solid #e2e8f0; padding: 8px;">${row.cells[column] ?? "-"}</td>`).join("")}
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </section>
-    `).join("");
+    const recipient = selectedProject.assignedManagerEmail?.trim();
+    if (!recipient) {
+      window.alert("No project manager email is available for the selected project.");
+      return;
+    }
 
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>Sarathi Executive Report</title>
-          <style>
-            body { font-family: Inter, Arial, sans-serif; padding: 32px; color: #0f172a; }
-            h1 { margin: 0 0 8px 0; }
-            .meta { margin: 0 0 24px 0; color: #64748b; font-size: 12px; }
-          </style>
-        </head>
-        <body>
-          <h1>${selectedProject.name} Executive Report</h1>
-          <div class="meta">Generated ${new Date(selectedReportsOverview.generatedAtUtc).toLocaleString()}</div>
-          ${sectionsHtml}
-          <script>window.onload = () => { window.print(); };</script>
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
+    const subject = `${selectedProject.name} executive report`;
+    const body = [
+      `Executive report for ${selectedProject.name}`,
+      `Completion: ${selectedProject.completion.toFixed(1)}%`,
+      `Delivery risk: ${selectedProject.risk}/100`,
+      `Report generated: ${generatedAt}`,
+    ].join("\n");
+
+    try {
+      setEmailing(true);
+      await reportsService.emailStakeholders(selectedProject.id, recipient, subject, body);
+      window.alert(`Email sent to ${recipient}`);
+    } catch (error) {
+      console.error("Failed to send email to stakeholders:", error);
+      window.alert("Failed to send email. Please try again or verify SMTP settings.");
+    } finally {
+      setEmailing(false);
+    }
   };
 
   return (
     <div className="space-y-6" style={{ fontFamily: "Inter, sans-serif" }}>
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-gray-900">AI Executive Reports</h2>
-          <p className="text-sm text-gray-500">AI-generated executive summaries powered by live backend report sections</p>
+          <h2 className="text-xl font-bold text-gray-900">{pageTitle}</h2>
+          <p className="text-sm text-gray-500">{pageSubtitle}</p>
         </div>
         <div className="flex gap-2">
           <select value={selectedProjectId ?? ""} onChange={(event) => setSelectedProjectId(Number(event.target.value))} className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700">
@@ -3182,8 +3505,8 @@ const AIExecutiveReports = ({ projects = [], reportsOverview = null, isAdministr
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <div className="lg:col-span-2 space-y-5">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-5 items-start">
+        <div className="space-y-5 min-w-0">
           <Card>
             <div className="flex items-center gap-2 mb-4">
               <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
@@ -3196,7 +3519,7 @@ const AIExecutiveReports = ({ projects = [], reportsOverview = null, isAdministr
             </div>
             <div className="prose prose-sm max-w-none">
               <p className="text-sm text-gray-700 leading-relaxed mb-3">
-                {aiAnalysis?.report ?? "Loading AI analysis from the selected project metrics..."}
+                Live operational data is loaded from the selected project's latest synchronized report snapshot.
               </p>
               <p className="text-sm text-gray-700 leading-relaxed mb-3">
                 <strong className="text-gray-900">{selectedProject?.name ?? "Selected project"}</strong> has a health score of <strong className="text-gray-900">{selectedProject?.health ?? avgHealth}%</strong>, completion of <strong className="text-gray-900">{selectedProject?.completion.toFixed(1) ?? "0.0"}%</strong>, and delivery risk of <strong className="text-gray-900">{selectedProject?.risk ?? 0}/100</strong>.
@@ -3211,7 +3534,7 @@ const AIExecutiveReports = ({ projects = [], reportsOverview = null, isAdministr
           </Card>
 
           <Card>
-            <SectionHeader title="Project Health Summary" subtitle="AI-analyzed status for the selected project" />
+            <SectionHeader title="Project Health Summary" subtitle="Current status for the selected project" />
             <div className="space-y-4">
               {topProjectsByHealth.map((project) => (
                 <div key={project.id} className={`p-4 rounded-xl border ${project.status === "critical" ? "border-red-100 bg-red-50/40" : project.status === "at-risk" ? "border-amber-100 bg-amber-50/40" : "border-green-100 bg-green-50/40"}`}>
@@ -3233,7 +3556,7 @@ const AIExecutiveReports = ({ projects = [], reportsOverview = null, isAdministr
           </Card>
 
           <Card>
-            <SectionHeader title="KPI Insights" subtitle="AI-interpreted performance analysis" />
+            <SectionHeader title="KPI Insights" subtitle="Current performance measures" />
             <div className="space-y-3">
               {kpiInsightCards.map((item, i) => (
                 <div key={i} className="p-3 bg-gray-50 rounded-xl">
@@ -3251,17 +3574,17 @@ const AIExecutiveReports = ({ projects = [], reportsOverview = null, isAdministr
           </Card>
         </div>
 
-        <div className="space-y-4">
+        <aside className="space-y-4 xl:sticky xl:top-5">
           <Card>
             <SectionHeader title="Report Metadata" />
             <div className="space-y-2.5 text-xs">
               {[
                 { label: "Report Period", value: generated ? "Live Snapshot" : "Refreshing" },
-                { label: "Generated By", value: "Sarathi AI v2.4" },
+                { label: "Generated By", value: "Sarathi Reports" },
                 { label: "Data Sources", value: "Azure DevOps, Internal KPIs" },
                 { label: "Projects Covered", value: `${totalProjects}` },
                 { label: "Data Freshness", value: generatedAt },
-                { label: "Confidence Score", value: portfolioSection ? "95%" : "Fallback" },
+                { label: "Data Status", value: portfolioSection ? "Live backend data" : "No report data" },
               ].map(item => (
                 <div key={item.label} className="flex justify-between">
                   <span className="text-gray-400">{item.label}</span>
@@ -3271,27 +3594,12 @@ const AIExecutiveReports = ({ projects = [], reportsOverview = null, isAdministr
             </div>
           </Card>
 
-          <Card>
-            <SectionHeader title="AI Recommendations" />
-            <div className="space-y-3">
-              {topRiskProjects.map((project, index) => (
-                <AIInsightCard
-                  key={project.id}
-                  type={index === 0 ? "critical" : "warning"}
-                  title={`${project.name}: Executive Attention`}
-                  insight={`Risk is ${project.risk}/100 with current completion at ${project.completion.toFixed(1)}%. Recommend explicit mitigation checkpoints in weekly governance reviews.`}
-                />
-              ))}
-              <AIInsightCard type="info" title="Portfolio cadence improving" insight={`Average velocity is ${avgVelocity.toFixed(2)} with sustained completion trend at ${avgCompletion.toFixed(1)}%.`} />
-            </div>
-          </Card>
-
-          <div className="space-y-2">
-            <Btn variant="secondary" icon={Download} size="md" className="w-full justify-center" onClick={handleExportPdf}>Download PDF Report</Btn>
-            <Btn variant="secondary" icon={Upload} size="md" className="w-full justify-center" onClick={handleExportExcel}>Export to Excel</Btn>
-            <Btn variant="ghost" icon={Mail} size="md" className="w-full justify-center">Email to Stakeholders</Btn>
-          </div>
-        </div>
+          {isAdministrator && (
+            <Btn variant="ghost" icon={Mail} size="md" className="w-full justify-center" onClick={handleEmailStakeholders} disabled={emailing}>
+              {emailing ? "Sending..." : "Email Stakeholders"}
+            </Btn>
+          )}
+        </aside>
       </div>
     </div>
   );
@@ -3300,64 +3608,29 @@ const AIExecutiveReports = ({ projects = [], reportsOverview = null, isAdministr
 // ──────────────────────────────────────────────
 // SCREEN: AI INSIGHTS (Chat)
 // ──────────────────────────────────────────────
-const AIInsights = ({
-  projects = [],
-  messages,
-  onMessagesChange,
-  selectedProjectId,
-  onSelectedProjectIdChange,
-}: {
-  projects?: ProjectRecord[];
-  messages: AiChatMessage[];
-  onMessagesChange: (messages: AiChatMessage[]) => void;
-  selectedProjectId: number | null;
-  onSelectedProjectIdChange: (projectId: number | null) => void;
-}) => {
+const AIInsights = ({ projects = [] }: { projects?: ProjectRecord[] }) => {
+  const [messages, setMessages] = useState(AI_CHAT);
   const [input, setInput] = useState("");
   const [typing, setTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!selectedProjectId && projects[0]) {
-      onSelectedProjectIdChange(projects[0].id);
-    }
-    if (selectedProjectId && !projects.some(project => project.id === selectedProjectId)) {
-      onSelectedProjectIdChange(projects[0]?.id ?? null);
-    }
-  }, [projects, selectedProjectId, onSelectedProjectIdChange]);
-
-  const selectedProject = projects.find(project => project.id === selectedProjectId) ?? null;
-  const projectId = selectedProject?.id;
-
-  const initialAIMessage = selectedProject
-    ? `Hello! I'm Sarathi AI for ${selectedProject.name}. Ask me about delivery health, sprint progress, blockers, risks, work items, or recommendations for this project.`
-    : "Hello! I'm Sarathi AI. Select an assigned project and ask about delivery health, sprint progress, blockers, risks, work items, or recommendations.";
-
-  const clearChat = () => {
-    onMessagesChange([{ role: "assistant", msg: initialAIMessage }]);
-  };
-
   const sendMessage = async () => {
     if (!input.trim()) return;
-    const userMsg = { role: "user" as const, msg: input };
-    const nextMessages = [...messages, userMsg];
-    onMessagesChange(nextMessages);
+    const userMsg = { role: "user", msg: input };
+    setMessages(prev => [...prev, userMsg]);
     setInput("");
     setTyping(true);
-    if (!projectId) {
-      onMessagesChange([...nextMessages, { role: "assistant", msg: "No assigned project is currently selected. Please select a project before asking questions." }]);
-      setTyping(false);
-      return;
-    }
-
+    const projectId = projects[0]?.id;
     try {
-      const analysis = await projectManagerService.getAiAnalysis(projectId, userMsg.msg);
-      onMessagesChange([...nextMessages, {
+      const analysis = projectId
+        ? await projectManagerService.getAiAnalysis(projectId, userMsg.msg)
+        : null;
+      setMessages(prev => [...prev, {
         role: "assistant",
         msg: analysis?.report ?? "No assigned project metrics are available yet. Synchronize Azure DevOps and select an assigned project.",
       }]);
     } catch {
-      onMessagesChange([...nextMessages, { role: "assistant", msg: "I could not retrieve the current project analysis. Please try again after the next synchronization." }]);
+      setMessages(prev => [...prev, { role: "assistant", msg: "I could not retrieve the current project analysis. Please try again after the next synchronization." }]);
     } finally {
       setTyping(false);
     }
@@ -3367,96 +3640,77 @@ const AIInsights = ({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, typing]);
 
-  const conversationStarted = messages.some(m => m.role === "user");
+  const quickActions = [
+    "Summarize portfolio health", "Which project is most at risk?",
+    "Predict Q3 delivery dates", "Root cause: FinBank delays",
+    "Top 3 action items", "Sprint 14 analysis",
+  ];
 
   return (
     <div className="h-[calc(100vh-8rem)] flex gap-5" style={{ fontFamily: "Inter, sans-serif" }}>
       {/* Chat */}
       <div className="flex-1 flex flex-col bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         {/* Chat Header */}
-        <div className="px-5 py-4 border-b border-gray-100 flex flex-col gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-gradient-to-br from-blue-600 to-purple-600 rounded-xl flex items-center justify-center">
-              <Bot size={18} className="text-white" />
-            </div>
-            <div className="flex-1">
-              <div className="text-sm font-bold text-gray-900">Sarathi AI Assistant</div>
-              <div className="text-xs text-green-500 font-medium flex items-center gap-1">
-                <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-                Online · Assigned project only
-              </div>
-            </div>
-            <Btn variant="ghost" icon={RotateCcw} size="xs" onClick={clearChat}>Clear chat</Btn>
+        <div className="px-5 py-4 border-b border-gray-100 flex items-center gap-3">
+          <div className="w-9 h-9 bg-gradient-to-br from-blue-600 to-purple-600 rounded-xl flex items-center justify-center">
+            <Bot size={18} className="text-white" />
           </div>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-xs text-gray-500">
-              The assistant answers only about the selected assigned project. Irrelevant questions will be rejected.
-            </div>
-            <div className="flex items-center gap-2">
-              <label htmlFor="project-select" className="text-xs text-gray-500 font-medium">Assigned project</label>
-              <select
-                id="project-select"
-                value={selectedProjectId ?? ""}
-                onChange={(event) => onSelectedProjectIdChange(event.target.value ? Number(event.target.value) : null)}
-                className="border border-gray-200 rounded-xl px-3 py-2 text-xs bg-white"
-              >
-                <option value="">Select a project</option>
-                {projects.map(project => (
-                  <option key={project.id} value={project.id}>{project.name}</option>
-                ))}
-              </select>
+          <div className="flex-1">
+            <div className="text-sm font-bold text-gray-900">Sarathi AI Assistant</div>
+            <div className="text-xs text-green-500 font-medium flex items-center gap-1">
+              <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+              Online · Analyzing live data
             </div>
           </div>
+          <Btn variant="ghost" icon={RotateCcw} size="xs">Clear chat</Btn>
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-5">
-          {!conversationStarted ? (
-            <div className="h-full flex flex-col items-center justify-center text-center gap-6 px-10">
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-gray-500">Sarathi AI is ready when you are.</div>
-                <div className="text-3xl font-semibold text-gray-900">Ready when you are.</div>
-              </div>
-
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {messages.map((m, i) => (
-                <motion.div key={i} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
-                  className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-                  {m.role === "assistant" && (
-                    <div className="w-7 h-7 bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <Sparkles size={13} className="text-white" />
-                    </div>
-                  )}
-                  <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                    m.role === "user"
-                      ? "bg-blue-600 text-white rounded-tr-sm"
-                      : "bg-gray-50 text-gray-800 rounded-tl-sm"
-                  }`}>
-                    <p className={`text-xs leading-relaxed whitespace-pre-line ${m.role === "user" ? "text-white" : "text-gray-700"}`}>{m.msg}</p>
-                  </div>
-                  {m.role === "user" && <Avatar initials="AU" size="xs" colorIdx={0} />}
-                </motion.div>
-              ))}
-              {typing && (
-                <div className="flex gap-3">
-                  <div className="w-7 h-7 bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg flex items-center justify-center flex-shrink-0">
-                    <Sparkles size={13} className="text-white" />
-                  </div>
-                  <div className="bg-gray-50 rounded-2xl rounded-tl-sm px-4 py-3">
-                    <div className="flex gap-1">
-                      {[0, 0.2, 0.4].map((d, i) => (
-                        <motion.div key={i} animate={{ y: [0, -4, 0] }} transition={{ repeat: Infinity, duration: 0.8, delay: d }}
-                          className="w-1.5 h-1.5 bg-gray-400 rounded-full" />
-                      ))}
-                    </div>
-                  </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {messages.map((m, i) => (
+            <motion.div key={i} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+              className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+              {m.role === "assistant" && (
+                <div className="w-7 h-7 bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <Sparkles size={13} className="text-white" />
                 </div>
               )}
-              <div ref={messagesEndRef} />
+              <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+                m.role === "user"
+                  ? "bg-blue-600 text-white rounded-tr-sm"
+                  : "bg-gray-50 text-gray-800 rounded-tl-sm"
+              }`}>
+                <p className={`text-xs leading-relaxed whitespace-pre-line ${m.role === "user" ? "text-white" : "text-gray-700"}`}>{m.msg}</p>
+              </div>
+              {m.role === "user" && <Avatar initials="AU" size="xs" colorIdx={0} />}
+            </motion.div>
+          ))}
+          {typing && (
+            <div className="flex gap-3">
+              <div className="w-7 h-7 bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg flex items-center justify-center flex-shrink-0">
+                <Sparkles size={13} className="text-white" />
+              </div>
+              <div className="bg-gray-50 rounded-2xl rounded-tl-sm px-4 py-3">
+                <div className="flex gap-1">
+                  {[0, 0.2, 0.4].map((d, i) => (
+                    <motion.div key={i} animate={{ y: [0, -4, 0] }} transition={{ repeat: Infinity, duration: 0.8, delay: d }}
+                      className="w-1.5 h-1.5 bg-gray-400 rounded-full" />
+                  ))}
+                </div>
+              </div>
             </div>
           )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Quick actions */}
+        <div className="px-5 py-2 border-t border-gray-50 flex gap-2 overflow-x-auto scrollbar-hide">
+          {quickActions.map(qa => (
+            <button key={qa} onClick={() => setInput(qa)}
+              className="flex-shrink-0 text-[10px] border border-blue-100 text-blue-600 rounded-full px-3 py-1.5 hover:bg-blue-50 transition-colors font-medium whitespace-nowrap">
+              {qa}
+            </button>
+          ))}
         </div>
 
         {/* Input */}
@@ -3466,9 +3720,8 @@ const AIInsights = ({
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === "Enter" && sendMessage()}
-              placeholder={selectedProject ? `Ask anything about ${selectedProject.name}...` : "Select a project before asking a question."}
-              disabled={!selectedProject}
-              className="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50 disabled:bg-gray-100"
+              placeholder="Ask anything about your projects, sprints, KPIs, or risks..."
+              className="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-gray-50"
             />
             <motion.button
               whileTap={{ scale: 0.95 }}
@@ -3481,6 +3734,59 @@ const AIInsights = ({
         </div>
       </div>
 
+      {/* Sidebar panels */}
+      <div className="w-72 flex flex-col gap-4 overflow-y-auto">
+        <Card>
+          <SectionHeader title="Analysis Panels" />
+          <div className="space-y-2">
+            {[
+              { label: "Sprint Analysis", icon: Target, color: "text-blue-500 bg-blue-50" },
+              { label: "Root Cause Analysis", icon: Search, color: "text-purple-500 bg-purple-50" },
+              { label: "Delivery Forecast", icon: TrendingUp, color: "text-green-500 bg-green-50" },
+              { label: "Productivity Analysis", icon: BarChart2, color: "text-amber-500 bg-amber-50" },
+            ].map(item => (
+              <button key={item.label} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-50 transition-colors text-left">
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${item.color}`}>
+                  <item.icon size={15} />
+                </div>
+                <span className="text-xs font-medium text-gray-700">{item.label}</span>
+                <ArrowRight size={12} className="text-gray-300 ml-auto" />
+              </button>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <SectionHeader title="AI Suggested Actions" />
+          <div className="space-y-2.5">
+            {[
+              { action: "Escalate FinBank Mobile risk to VP Engineering", priority: "P1" },
+              { action: "Schedule scope review for AI Support Desk", priority: "P1" },
+              { action: "Share SmartHR best practices with other PMs", priority: "P2" },
+              { action: "Review external vendor API dependency plan", priority: "P2" },
+            ].map((item, i) => (
+              <div key={i} className="flex items-start gap-2 p-2.5 bg-gray-50 rounded-xl">
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded mt-0.5 flex-shrink-0 ${item.priority === "P1" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-600"}`}>
+                  {item.priority}
+                </span>
+                <p className="text-xs text-gray-600">{item.action}</p>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <SectionHeader title="Conversation History" />
+          <div className="space-y-2">
+            {["Portfolio risk Q2 review", "FinBank sprint analysis", "SmartHR velocity deep-dive", "Q3 delivery forecast"].map((h, i) => (
+              <button key={i} className="w-full text-left p-2.5 rounded-xl hover:bg-gray-50 transition-colors">
+                <div className="text-xs font-medium text-gray-700 truncate">{h}</div>
+                <div className="text-[10px] text-gray-400">{i + 1}h ago</div>
+              </button>
+            ))}
+          </div>
+        </Card>
+      </div>
     </div>
   );
 };
@@ -3704,13 +4010,22 @@ const UserRoleManagement = () => {
 // ──────────────────────────────────────────────
 const SyncMonitor = () => {
   const [liveSummary, setLiveSummary] = useState<AzureDevOpsLiveSummaryDto | null>(null);
+  const [liveSchedules, setLiveSchedules] = useState<AzureDevOpsScheduleDto[]>([]);
   const [configuration, setConfiguration] = useState<AzureDevOpsIntegrationConfigurationDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSyncingAll, setIsSyncingAll] = useState(false);
   const [syncingProject, setSyncingProject] = useState<string | null>(null);
   const [savingConfiguration, setSavingConfiguration] = useState(false);
-  const [lastSyncClickedAt, setLastSyncClickedAt] = useState<string | null>(null);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [scheduleForm, setScheduleForm] = useState<UpsertAzureDevOpsScheduleRequestDto>({
+    name: "Azure DevOps Sync",
+    syncType: "Full",
+    scopeName: "All Projects",
+    intervalMinutes: 60,
+    isEnabled: true,
+  });
   const [configForm, setConfigForm] = useState<UpdateAzureDevOpsIntegrationConfigurationRequestDto>({
     organizationUrl: "",
     projectFilter: "",
@@ -3724,14 +4039,18 @@ const SyncMonitor = () => {
   const loadMonitor = async () => {
     setLoading(true);
     try {
-      const currentConfiguration = await azureDevOpsService.getConfiguration();
-      setConfiguration(currentConfiguration);
-      setConfigForm({
-        organizationUrl: currentConfiguration.organizationUrl,
-        projectFilter: currentConfiguration.projectFilter,
-        syncEnabled: currentConfiguration.syncEnabled,
-        personalAccessToken: "",
-      });
+      const currentConfiguration = configuration ?? await azureDevOpsService.getConfiguration();
+      if (!configuration) {
+        setConfiguration(currentConfiguration);
+        setConfigForm({
+          organizationUrl: currentConfiguration.organizationUrl,
+          projectFilter: currentConfiguration.projectFilter,
+          syncEnabled: currentConfiguration.syncEnabled,
+          personalAccessToken: "",
+        });
+      }
+
+      const schedulesPromise = azureDevOpsService.getSchedules();
 
       if (!hasLiveAzureDevOpsConnection(currentConfiguration)) {
         setLiveSummary({
@@ -3751,18 +4070,38 @@ const SyncMonitor = () => {
           timeline: [],
           metrics: [],
         });
+
+        setLiveSchedules(await schedulesPromise);
         setError(currentConfiguration.organizationUrl.trim()
           ? "Azure DevOps PAT is not configured."
           : "Azure DevOps organization URL is not configured.");
         return;
       }
 
-      const summary = await azureDevOpsService.getLiveSummary();
+      const [summary, schedules] = await Promise.all([
+        azureDevOpsService.getLiveSummary(),
+        schedulesPromise,
+      ]);
+
       setLiveSummary(summary);
+      setLiveSchedules(schedules);
       setError(summary.isConfigured ? null : summary.message);
+
+      if (schedules.length > 0) {
+        const firstSchedule = schedules[0];
+        setScheduleForm({
+          id: firstSchedule.id,
+          name: firstSchedule.name,
+          syncType: firstSchedule.syncType,
+          scopeName: firstSchedule.scopeName,
+          intervalMinutes: firstSchedule.intervalMinutes,
+          isEnabled: firstSchedule.isEnabled,
+        });
+      }
     } catch (exception) {
       console.error('Failed to load Azure DevOps monitor:', exception);
       setLiveSummary(null);
+      setLiveSchedules([]);
       setError('Unable to load live Azure DevOps data right now.');
     } finally {
       setLoading(false);
@@ -3838,13 +4177,27 @@ const SyncMonitor = () => {
   };
 
   const handleSyncAll = async () => {
-    const clickedAt = new Date().toISOString();
-    setLastSyncClickedAt(clickedAt);
     setIsSyncingAll(true);
     try {
       await queueSync('All Projects');
     } finally {
       setIsSyncingAll(false);
+    }
+  };
+
+  const handleScheduleSave = async () => {
+    setSavingSchedule(true);
+    setError(null);
+
+    try {
+      await azureDevOpsService.upsertSchedule(scheduleForm);
+      await loadMonitor();
+      setShowScheduleModal(false);
+    } catch (exception) {
+      console.error('Failed to save Azure DevOps schedule:', exception);
+      setError('Unable to save the Azure DevOps schedule.');
+    } finally {
+      setSavingSchedule(false);
     }
   };
 
@@ -3896,9 +4249,7 @@ const SyncMonitor = () => {
 
       {liveSummary && (
         <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600 shadow-sm">
-          {lastSyncClickedAt
-            ? `Synced at ${new Date(lastSyncClickedAt).toLocaleString()} · ${liveSummary.message}`
-            : `Last refreshed ${formatRelativeTime(liveSummary.generatedAtUtc)} · ${liveSummary.message}`}
+          Last refreshed {new Date(liveSummary.generatedAtUtc).toLocaleString()} · {liveSummary.message}
         </div>
       )}
 
@@ -3965,6 +4316,35 @@ const SyncMonitor = () => {
         <KPICard title="Avg Sync Time" value={formatDurationSeconds(averageDuration)} change="Live Azure DevOps" changeType="stable" icon={Clock} color="bg-indigo-500" />
       </div>
 
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        {monitorJobs.map((job) => (
+          <motion.div key={job.project} whileHover={{ y: -2 }} className={`bg-white rounded-xl shadow-sm border p-4 ${
+            job.status === "failed" ? "border-red-200" : job.status === "warning" ? "border-amber-200" : job.status === "running" ? "border-blue-200" : "border-gray-100"
+          }`}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-8 h-8 bg-blue-50 rounded-lg flex items-center justify-center">
+                <Building2 size={15} className="text-blue-600" />
+              </div>
+              <StatusBadge status={job.status} />
+            </div>
+            <div className="text-xs font-bold text-gray-900 mb-0.5 truncate">{job.project}</div>
+            <div className="text-[10px] text-gray-400 mb-3 truncate">{job.org}</div>
+            <div className="space-y-1.5 text-[10px] mb-3">
+              <div className="flex justify-between"><span className="text-gray-400">Last Sync</span><span className={`font-semibold ${job.status === "failed" ? "text-red-600" : "text-gray-700"}`}>{job.lastSync}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">Items</span><span className="font-semibold text-gray-700">{job.items || "-"}</span></div>
+            </div>
+            <button
+              onClick={() => void queueSync(job.project)}
+              disabled={isSyncingAll || syncingProject === job.project}
+              className="w-full flex items-center justify-center gap-1.5 text-[10px] font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 disabled:opacity-60 rounded-lg py-2 transition-colors"
+            >
+              {syncingProject === job.project
+                ? <><Loader2 size={11} className="animate-spin" />Syncing...</>
+                : <><RefreshCw size={11} />Sync Now</>}
+            </button>
+          </motion.div>
+        ))}
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <Card>
@@ -3998,6 +4378,98 @@ const SyncMonitor = () => {
           </ResponsiveContainer>
         </Card>
       </div>
+
+      {showScheduleModal && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+          <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} className="w-full max-w-2xl rounded-2xl bg-white shadow-2xl p-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-5">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Azure DevOps Schedule</h3>
+                <p className="text-xs text-gray-500">Create or review sync schedules backed by the API.</p>
+              </div>
+              <button onClick={() => setShowScheduleModal(false)} className="p-2 hover:bg-gray-100 rounded-lg">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1.5">Schedule Name</label>
+                <input
+                  value={scheduleForm.name}
+                  onChange={(event) => setScheduleForm((current) => ({ ...current, name: event.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1.5">Sync Type</label>
+                <input
+                  value={scheduleForm.syncType}
+                  onChange={(event) => setScheduleForm((current) => ({ ...current, syncType: event.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1.5">Scope Name</label>
+                <input
+                  value={scheduleForm.scopeName}
+                  onChange={(event) => setScheduleForm((current) => ({ ...current, scopeName: event.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1.5">Interval Minutes</label>
+                <input
+                  type="number"
+                  min={5}
+                  max={1440}
+                  value={scheduleForm.intervalMinutes}
+                  onChange={(event) => setScheduleForm((current) => ({ ...current, intervalMinutes: Number.parseInt(event.target.value, 10) || 60 }))}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            <label className="mt-4 flex items-center gap-2 text-xs font-medium text-gray-700">
+              <input
+                type="checkbox"
+                checked={scheduleForm.isEnabled}
+                onChange={(event) => setScheduleForm((current) => ({ ...current, isEnabled: event.target.checked }))}
+              />
+              Enabled
+            </label>
+
+            <div className="flex gap-2 mt-5">
+              <Btn variant="primary" size="md" className="flex-1 justify-center" onClick={() => void handleScheduleSave()}>
+                {savingSchedule ? 'Saving...' : 'Save Schedule'}
+              </Btn>
+              <Btn variant="secondary" size="md" className="flex-1 justify-center" onClick={() => setShowScheduleModal(false)}>
+                Close
+              </Btn>
+            </div>
+
+            <div className="mt-6">
+              <SectionHeader title="Existing Schedules" subtitle="Pulled from the API" />
+              <div className="space-y-2">
+                {liveSchedules.length === 0 ? (
+                  <div className="text-xs text-gray-500 rounded-xl border border-dashed border-gray-200 p-4">No schedules found yet.</div>
+                ) : liveSchedules.map((schedule) => (
+                  <div key={schedule.id} className="rounded-xl border border-gray-100 bg-gray-50 p-3 flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold text-gray-800">{schedule.name}</div>
+                      <div className="text-[10px] text-gray-400">{schedule.syncType} · {schedule.scopeName} · Every {schedule.intervalMinutes} minutes</div>
+                    </div>
+                    <div className="text-right">
+                      <StatusBadge status={schedule.isEnabled ? 'success' : 'inactive'} />
+                      <div className="text-[10px] text-gray-400 mt-1">Next run {formatRelativeTime(schedule.nextRunUtc)}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 };
@@ -4008,27 +4480,11 @@ const SyncMonitor = () => {
 const AuditLogsScreen = () => {
   const [tab, setTab] = useState("all");
   const [search, setSearch] = useState("");
-  const [userFilter, setUserFilter] = useState("");
-  const [refreshStatus, setRefreshStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
-  const users = useMemo(() => Array.from(new Set(AUDIT_LOGS.map((item) => item.user))).sort(), []);
-
-  const refreshAuditLogs = () => {
-    setRefreshStatus(null);
-    try {
-      setRefreshStatus({ type: "success", message: "Audit logs refreshed successfully." });
-    } catch {
-      setRefreshStatus({ type: "error", message: "Failed to refresh audit logs. Please try again." });
-    } finally {
-      window.setTimeout(() => setRefreshStatus(null), 3500);
-    }
-  };
-
-  const filtered = AUDIT_LOGS.filter((l) =>
-    (userFilter === "" || l.user === userFilter) &&
-    (l.action.toLowerCase().includes(search.toLowerCase()) ||
-      l.user.toLowerCase().includes(search.toLowerCase()) ||
-      l.resource.toLowerCase().includes(search.toLowerCase()))
+  const filtered = AUDIT_LOGS.filter(l =>
+    l.action.toLowerCase().includes(search.toLowerCase()) ||
+    l.user.toLowerCase().includes(search.toLowerCase()) ||
+    l.resource.toLowerCase().includes(search.toLowerCase())
   );
 
   return (
@@ -4038,16 +4494,8 @@ const AuditLogsScreen = () => {
           <h2 className="text-xl font-bold text-gray-900">Audit Logs</h2>
           <p className="text-sm text-gray-500">Complete audit trail for all system events and user actions</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Btn variant="secondary" size="md" icon={RefreshCw} onClick={() => void refreshAuditLogs()} className="font-semibold min-w-[140px] px-5 py-3 hover:bg-slate-100">Refresh</Btn>
-          <Btn variant="secondary" icon={Download}>Export CSV</Btn>
-        </div>
+        <Btn variant="secondary" icon={Download}>Export CSV</Btn>
       </div>
-      {refreshStatus && (
-        <div className={`rounded-xl border px-4 py-3 text-sm font-medium ${refreshStatus.type === "success" ? "border-emerald-100 bg-emerald-50 text-emerald-700" : "border-red-100 bg-red-50 text-red-700"}`}>
-          {refreshStatus.message}
-        </div>
-      )}
 
       <div className="flex gap-1 border-b border-gray-200">
         {["all", "login", "sync", "ai", "admin"].map(t => (
@@ -4059,25 +4507,14 @@ const AuditLogsScreen = () => {
       </div>
 
       <Card padding="p-0">
-        <div className="p-5 border-b border-gray-100 space-y-3 md:space-y-0 md:flex md:items-center md:justify-between gap-3">
-          <div className="flex-1 min-w-0 flex items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
+        <div className="p-5 border-b border-gray-100 flex items-center gap-3">
+          <div className="flex-1 flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-2 bg-gray-50">
             <Search size={13} className="text-gray-400" />
             <input value={search} onChange={e => setSearch(e.target.value)}
-              placeholder="Search by action or resource..."
-              className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-400 text-gray-700" />
+              placeholder="Search by user, action, or resource..."
+              className="flex-1 text-xs outline-none bg-transparent" />
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <label htmlFor="user-filter" className="text-sm font-semibold text-gray-600">Filter by user</label>
-            <select
-              id="user-filter"
-              value={userFilter}
-              onChange={(e) => setUserFilter(e.target.value)}
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-            >
-              <option value="">All users</option>
-              {users.map((user) => <option key={user} value={user}>{user}</option>)}
-            </select>
-          </div>
+          <Btn variant="secondary" icon={Filter}>Filters</Btn>
         </div>
         <table className="w-full text-xs">
           <thead><tr className="border-b border-gray-50">
@@ -4089,11 +4526,12 @@ const AuditLogsScreen = () => {
             {filtered.map((log, i) => (
               <motion.tr key={i} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.03 }}
                 className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
-                <td className="px-5 py-4 font-mono text-slate-600 whitespace-nowrap">{log.time}</td>
-                <td className="px-5 py-4 text-slate-700 truncate max-w-[140px]">{log.user}</td>
-                <td className="px-5 py-4 font-semibold text-slate-900">{log.action}</td>
-                <td className="px-5 py-4 text-slate-600 truncate max-w-[160px]">{log.resource}</td>
-                <td className="px-5 py-4 font-mono text-slate-500">{log.ip}</td>
+                <td className="px-5 py-3 font-mono text-gray-500 text-[10px] whitespace-nowrap">{log.time}</td>
+                <td className="px-5 py-3 text-gray-600 truncate max-w-[140px]">{log.user}</td>
+                <td className="px-5 py-3 font-semibold text-gray-800">{log.action}</td>
+                <td className="px-5 py-3 text-gray-500 truncate max-w-[160px]">{log.resource}</td>
+                <td className="px-5 py-3 font-mono text-gray-400">{log.ip}</td>
+                <td className="px-5 py-3"><StatusBadge status={log.status} /></td>
               </motion.tr>
             ))}
           </tbody>
@@ -4243,14 +4681,11 @@ const NotificationsScreen = () => {
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h2 className="text-xl font-bold text-gray-900">Notifications</h2>
-          <p className="text-sm text-gray-500">{unread} unread · {notifs.length} total</p>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <Btn variant="secondary" onClick={markAllRead}>Mark all read</Btn>
           <Btn variant="secondary" icon={RefreshCw} onClick={refreshLiveData}>
             {loading ? "Refreshing..." : "Refresh Live Data"}
           </Btn>
-          <Btn variant="secondary" icon={Settings}>Notification settings</Btn>
         </div>
       </div>
 
@@ -4582,18 +5017,22 @@ const PortfolioEnterpriseDashboard = ({
   dashboardKpis?: DashboardKpiCalculationsDto | null;
   adminStats?: AdminProjectStatisticsDto | null;
 }) => {
-  const active = projects.filter(p => p.status !== "completed").length;
-  const critical = projects.filter(p => p.risk >= 75).length;
-  const delayed = projects.filter(p => p.status !== "on-track").length;
-  const overallHealth = projects.length
-    ? `${Math.round(projects.reduce((acc, project) => acc + project.health, 0) / projects.length)}%`
-    : "0%";
+  const active = projects.filter((p) => p.status !== "critical" && p.status !== "at-risk").length;
+  const delayed = projects.filter((p) => p.status === "at-risk" || p.status === "critical").length;
+  const completed = projects.filter((p) => p.completion >= 95).length;
+  const overallHealth = dashboardKpis
+    ? `${Math.round(dashboardKpis.averageCompletionRate)}%`
+    : projects.length
+      ? `${Math.round(projects.reduce((acc, project) => acc + project.health, 0) / projects.length)}%`
+      : "0%";
   const orgHealth = dashboardKpis
     ? `${Math.round(dashboardKpis.averageBacklogHealth)}%`
     : projects.length
-    ? `${Math.round(projects.reduce((acc, project) => acc + (100 - project.risk), 0) / projects.length)}%`
-    : "0%";
-  const highRiskProjects = projects.filter(p => p.risk >= 60).sort((a, b) => b.risk - a.risk).slice(0, 5);
+      ? `${Math.round(projects.reduce((acc, project) => acc + (100 - project.risk), 0) / projects.length)}%`
+      : "0%";
+  const highRiskProjects = projects.filter((p) => p.risk >= 60).sort((a, b) => b.risk - a.risk).slice(0, 5);
+  const totalProjects = adminStats?.totalProjects ?? projects.length;
+  const highRiskCount = adminStats?.highRiskProjects ?? projects.filter((p) => p.risk >= 60).length;
   return (
     <div className="space-y-6" style={{ fontFamily: "Inter, sans-serif" }}>
       <div className="flex items-center justify-between">
@@ -4603,14 +5042,14 @@ const PortfolioEnterpriseDashboard = ({
         </div>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard title="Total Projects" value={projects.length} icon={FolderKanban} color="bg-blue-600" subtitle="Portfolio scope" />
-        <KpiCard title="Active Projects" value={active} icon={Activity} color="bg-green-600" subtitle="Currently running" />
-        <KpiCard title="Completed Projects" value="0" icon={CheckCircle} color="bg-indigo-500" subtitle="This quarter" />
-        <KpiCard title="Delayed Projects" value={delayed} icon={Clock} color="bg-amber-500" subtitle="Schedule variance" />
-        <KpiCard title="High Risk Projects" value={projects.filter(p => p.risk >= 60).length} icon={AlertTriangle} color="bg-red-500" subtitle="Needs intervention" />
-        <KpiCard title="Critical Risk Projects" value={critical} icon={Shield} color="bg-red-600" subtitle="Executive escalation" />
-        <KpiCard title="Overall Delivery Health" value={overallHealth} icon={Award} color="bg-teal-600" subtitle="Weighted portfolio score" />
-        <KpiCard title="Overall Organization Health" value={orgHealth} icon={Building2} color="bg-purple-600" subtitle="Backlog health score" />
+        <KpiCard title="Total Projects" value={totalProjects} change="Live" changeType="up" icon={FolderKanban} color="bg-blue-600" subtitle="Portfolio scope" />
+        <KpiCard title="Active Projects" value={active} change="Live" changeType="up" icon={Activity} color="bg-green-600" subtitle="Currently running" />
+        <KpiCard title="Completed Projects" value={completed} change="Live" changeType="up" icon={CheckCircle} color="bg-indigo-500" subtitle="High completion" />
+        <KpiCard title="Delayed Projects" value={delayed} change="Live" changeType={delayed > 0 ? "down" : "up"} icon={Clock} color="bg-amber-500" subtitle="Schedule variance" />
+        <KpiCard title="High Risk Projects" value={highRiskCount} change="Live" changeType={highRiskCount > 0 ? "down" : "up"} icon={AlertTriangle} color="bg-red-500" subtitle="Needs intervention" />
+        <KpiCard title="Critical Risk Projects" value={projects.filter((project) => project.risk >= 75).length} change="Live" changeType={projects.some((project) => project.risk >= 75) ? "down" : "up"} icon={Shield} color="bg-red-600" subtitle="Executive escalation" />
+        <KpiCard title="Overall Delivery Health" value={overallHealth} change="Live" changeType="up" icon={Award} color="bg-teal-600" subtitle="Weighted portfolio score" />
+        <KpiCard title="Overall Organization Health" value={orgHealth} change="Live" changeType="up" icon={Building2} color="bg-purple-600" subtitle="Backlog health score" />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <Card>
@@ -4658,7 +5097,7 @@ const PortfolioEnterpriseDashboard = ({
                 <th className="text-left py-3 px-4 text-gray-600 font-semibold">Project</th>
                 <th className="text-center py-3 px-4 text-gray-600 font-semibold">Risk</th>
                 <th className="text-center py-3 px-4 text-gray-600 font-semibold">Health</th>
-                <th className="text-left py-3 px-4 text-gray-600 font-semibold">Owner</th>
+                <th className="text-left py-3 px-4 text-gray-600 font-semibold">Project Manager</th>
               </tr>
             </thead>
             <tbody>
@@ -4946,6 +5385,29 @@ const ProjectManagerRiskAnalysisPage = ({ email, onNavigate, projectsOverride }:
   const riskLevel = selectedProject.risk >= 75 ? "Critical" : selectedProject.risk >= 60 ? "High" : selectedProject.risk >= 35 ? "Medium" : "Low";
   const [aiAnalysis, setAiAnalysis] = useState<ProjectManagerAiAnalysisDto | null>(null);
 
+  const handleExportRiskReport = () => {
+    const exportData = [
+      { Field: 'Project Name', Value: selectedProject.name },
+      { Field: 'Project Code', Value: selectedProject.code },
+      { Field: 'Business Unit', Value: selectedProject.businessUnit },
+      { Field: 'Sprint', Value: selectedProject.sprint },
+      { Field: 'Delivery Health', Value: `${selectedProject.health}%` },
+      { Field: 'Risk Score', Value: `${selectedProject.risk}/100` },
+      { Field: 'Risk Level', Value: riskLevel },
+      { Field: 'Completion', Value: `${selectedProject.completion}%` },
+      { Field: 'Velocity', Value: selectedProject.velocity },
+      { Field: 'Release Status', Value: selectedProject.releaseStatus },
+      { Field: 'AI Risk Analysis', Value: aiAnalysis?.riskAnalysis ?? 'Not available' },
+      { Field: 'AI Recommendation', Value: aiAnalysis?.recommendations[0] ?? 'Not available' },
+      { Field: 'Owner Action', Value: aiAnalysis?.recommendations[1] ?? 'Not available' },
+      { Field: 'Next Review', Value: aiAnalysis?.recommendations[2] ?? 'Not available' },
+    ];
+    const ws = XLSX.utils.json_to_sheet(exportData, { header: ['Field', 'Value'] });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Risk Report');
+    XLSX.writeFile(wb, `Sarathi-RiskReport-${selectedProject.name.replace(/[^a-z0-9]/gi, '_')}-${new Date().toISOString().split('T')[0]}.xlsx`);
+  };
+
   useEffect(() => {
     if (!projects.some((project) => project.id === selectedId)) {
       setSelectedId(projects[0]?.id ?? null);
@@ -4968,7 +5430,7 @@ const ProjectManagerRiskAnalysisPage = ({ email, onNavigate, projectsOverride }:
           <h2 className="text-xl font-bold text-gray-900">Risk Analysis</h2>
           <p className="text-sm text-gray-500">Assigned project risk, root cause and mitigation workflow</p>
         </div>
-        <Btn variant="primary" icon={FileText}>Risk Report</Btn>
+        <Btn variant="primary" icon={FileText} onClick={handleExportRiskReport}>Risk Report</Btn>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-5">
@@ -4990,7 +5452,7 @@ const ProjectManagerRiskAnalysisPage = ({ email, onNavigate, projectsOverride }:
 
         <div className="space-y-5">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <KpiCard title="Risk Score" value={`${aiAnalysis?.riskScore ?? selectedProject.risk}/100`} icon={Shield} color={(aiAnalysis?.riskScore ?? selectedProject.risk) >= 60 ? "bg-red-500" : "bg-amber-500"} subtitle={riskLevel} />
+            <KpiCard title="Risk Score" value={`${selectedProject.risk}/100`} icon={Shield} color={selectedProject.risk >= 60 ? "bg-red-500" : "bg-amber-500"} subtitle={riskLevel} />
             <KpiCard title="Predicted Delay" value={selectedProject.risk >= 60 ? "2-3w" : "0-1w"} icon={Clock} color="bg-amber-500" />
             <KpiCard title="Confidence" value="88%" icon={Brain} color="bg-purple-600" />
             <KpiCard title="Blocked Stories" value={aiAnalysis?.blockedItems ?? 0} icon={Lock} color="bg-red-500" />
@@ -5034,11 +5496,6 @@ const ITLiveOperationsPage = ({ section, onNavigate }: { section: ItOperationsSe
   const [scheduling, setScheduling] = useState<ItAdminSchedulingDto | null>(null);
   const [users, setUsers] = useState<ItAdminUserDto[]>([]);
   const [audits, setAudits] = useState<ItAdminLoginAuditDto[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [roleFilter, setRoleFilter] = useState("all");
-  const [auditSearchQuery, setAuditSearchQuery] = useState("");
-  const [auditUserFilter, setAuditUserFilter] = useState("");
-  const [refreshStatus, setRefreshStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -5057,234 +5514,31 @@ const ITLiveOperationsPage = ({ section, onNavigate }: { section: ItOperationsSe
     } finally { setLoading(false); }
   };
 
-  const refreshSection = async (successMessage: string, errorMessage: string) => {
-    setRefreshStatus(null);
-    try {
-      await load();
-      setRefreshStatus({ type: "success", message: successMessage });
-    } catch (exception) {
-      setRefreshStatus({ type: "error", message: errorMessage });
-    } finally {
-      window.setTimeout(() => setRefreshStatus(null), 3500);
-    }
-  };
-
-  const refreshUsers = async () => refreshSection("Users refreshed successfully.", "Failed to refresh users. Please try again.");
-  const refreshAuditLogs = async () => refreshSection("Audit logs refreshed successfully.", "Failed to refresh audit logs. Please try again.");
-  const refreshMonitoring = async () => refreshSection("Monitoring refreshed successfully.", "Failed to refresh monitoring. Please try again.");
-  const refreshMaintenance = async () => refreshSection("Maintenance refreshed successfully.", "Failed to refresh maintenance. Please try again.");
-
-  const auditUsers = useMemo(() => Array.from(new Set(audits.map((item) => item.userName || item.email))).sort(), [audits]);
-
-  const filteredAuditLogs = useMemo(() => {
-    const query = auditSearchQuery.trim().toLowerCase();
-    return audits.filter((audit) => {
-      const userLabel = audit.userName || audit.email;
-      return (
-        (auditUserFilter === "" || userLabel === auditUserFilter) &&
-        (
-          userLabel.toLowerCase().includes(query) ||
-          audit.email.toLowerCase().includes(query) ||
-          audit.ipAddress.toLowerCase().includes(query) ||
-          audit.status.toLowerCase().includes(query)
-        )
-      );
-    });
-  }, [audits, auditSearchQuery, auditUserFilter]);
-
-  const roleBadgeClass = (role: string) => {
-    const normalized = role.trim();
-    const badgeMap: Record<string, string> = {
-      "Administrator": "bg-blue-50 text-blue-700",
-      "IT Admin": "bg-purple-50 text-purple-700",
-      "Project Manager": "bg-emerald-50 text-emerald-700",
-      "Org Admin": "bg-slate-50 text-slate-700",
-      "ProjectManager": "bg-emerald-50 text-emerald-700",
-      "ITAdmin": "bg-purple-50 text-purple-700",
-    };
-    return badgeMap[normalized] ?? "bg-gray-50 text-gray-700";
-  };
-
-  const filteredUsers = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    return users.filter((user) => {
-      const matchesQuery = query.length === 0 || [user.name, user.email, user.role].some((value) => value?.toLowerCase().includes(query));
-      const matchesRole = roleFilter === "all" || user.role === roleFilter;
-      return matchesQuery && matchesRole;
-    });
-  }, [users, searchQuery, roleFilter]);
-
   useEffect(() => { void load(); }, []);
   const date = (value: string | null | undefined) => value ? new Date(value).toLocaleString() : "Never";
   const runSync = async () => { await itAdminService.runSynchronization({ syncType: "Full", scopeName: "All Projects", source: "Manual" }); await load(); };
   const title = { health: "Application Health", users: "Users", audit: "Audit Logs", monitoring: "Monitoring", maintenance: "Maintenance" }[section];
 
-  if (section === "users") return (
-    <div className="space-y-5">
-      <SectionHeader
-        title={title}
-        subtitle="Live Microsoft Entra users synchronized by the IT Admin API"
-        actions={
-          <Btn variant="secondary" size="md" icon={RefreshCw} onClick={() => void refreshUsers()} className="font-semibold px-5 py-3 hover:bg-slate-100">Refresh</Btn>
-        }
-      />
-
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div className="flex-1 min-w-0">
-          <label htmlFor="user-search" className="sr-only">Search users</label>
-          <div className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
-            <Search size={14} className="text-gray-400" />
-            <input
-              id="user-search"
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by name, email or role"
-              className="min-w-0 flex-1 bg-transparent text-sm text-gray-700 outline-none placeholder:text-gray-400"
-            />
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <label htmlFor="role-filter" className="text-xs font-semibold text-gray-600">Role</label>
-          <select
-            id="role-filter"
-            value={roleFilter}
-            onChange={(e) => setRoleFilter(e.target.value)}
-            className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-          >
-            <option value="all">All roles</option>
-            <option value="Administrator">Administrator</option>
-            <option value="ITAdmin">ITAdmin</option>
-            <option value="ProjectManager">ProjectManager</option>
-           
-          </select>
-        </div>
-      </div>
-
-      {refreshStatus && (
-        <div className={`rounded-xl border px-4 py-3 text-sm font-medium ${refreshStatus.type === "success" ? "border-emerald-100 bg-emerald-50 text-emerald-700" : "border-red-100 bg-red-50 text-red-700"}`}>
-          {refreshStatus.message}
-        </div>
-      )}
-
-      <Card padding="p-0">
-        <div className="overflow-x-auto">
-          <table className="min-w-full border-separate border-spacing-0 text-[14px]">
-            <thead>
-              <tr className="bg-slate-50 text-left text-[15px] uppercase tracking-wider text-slate-600">
-                {['User', 'Email', 'Role', 'Last Login', 'Status'].map((h) => (
-                  <th key={h} className="px-6 py-4 font-bold">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan={5} className="px-6 py-8 text-center text-sm text-gray-500">Loading users...</td>
-                </tr>
-              ) : filteredUsers.length > 0 ? (
-                filteredUsers.map((user) => (
-                  <tr key={user.userId} className="border-b border-gray-100 hover:bg-slate-50 transition-colors">
-                    <td className="px-6 py-4 font-semibold text-slate-900">{user.name}</td>
-                    <td className="px-6 py-4 text-slate-600">{user.email}</td>
-                    <td className="px-6 py-4">
-                      <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${roleBadgeClass(user.role)}`}>
-                        {user.role}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-slate-600">{date(user.lastLoginUtc)}</td>
-                    <td className="px-6 py-4">
-                      <StatusBadge status={(user.lastLoginUtc ? 'active' : 'inactive').toLowerCase()} />
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={5} className="px-6 py-8 text-center text-sm text-gray-500">No users match the current search or filter.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-    </div>
-  );
-  if (section === "audit") return (
-    <div className="space-y-5">
-      <SectionHeader title={title} subtitle="Live login and logout audit events" actions={<Btn variant="secondary" size="md" icon={RefreshCw} onClick={() => void refreshAuditLogs()} className="font-semibold px-5 py-3 hover:bg-slate-100">Refresh</Btn>} />
-      {refreshStatus && (
-        <div className={`rounded-xl border px-4 py-3 text-sm font-medium ${refreshStatus.type === "success" ? "border-emerald-100 bg-emerald-50 text-emerald-700" : "border-red-100 bg-red-50 text-red-700"}`}>
-          {refreshStatus.message}
-        </div>
-      )}
-      <Card padding="p-0">
-        <div className="p-5 border-b border-gray-100 space-y-3 md:space-y-0 md:flex md:items-center md:justify-between gap-3">
-          <div className="flex-1 min-w-0 flex items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
-            <Search size={14} className="text-gray-400" />
-            <input
-              value={auditSearchQuery}
-              onChange={(e) => setAuditSearchQuery(e.target.value)}
-              placeholder="Search by user or IP..."
-              className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-400 text-gray-700"
-            />
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <label htmlFor="audit-user-filter" className="text-sm font-semibold text-gray-600">Filter by user</label>
-            <select
-              id="audit-user-filter"
-              value={auditUserFilter}
-              onChange={(e) => setAuditUserFilter(e.target.value)}
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-            >
-              <option value="">All users</option>
-              {auditUsers.map((user) => <option key={user} value={user}>{user}</option>)}
-            </select>
-          </div>
-        </div>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-50 bg-slate-50 text-left text-[15px] uppercase tracking-wider text-slate-600">
-              {["Timestamp", "User", "IP Address"].map(h => (
-                <th key={h} className="px-5 py-4 font-bold">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {filteredAuditLogs.map((audit) => (
-              <tr key={audit.auditId} className="border-b border-gray-50 hover:bg-slate-50 transition-colors">
-                <td className="px-5 py-4 text-slate-600">{date(audit.loginTime)}</td>
-                <td className="px-5 py-4 text-slate-700">{audit.userName || audit.email}</td>
-                <td className="px-5 py-4 text-slate-500">{audit.ipAddress || "-"}</td>
-              </tr>
-            ))}
-            {!loading && filteredAuditLogs.length === 0 && (
-              <tr>
-                <td colSpan={3} className="px-5 py-8 text-center text-sm text-gray-500">No audit events found.</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </Card>
-    </div>
-  );
-  if (section === "maintenance") return <div className="space-y-5"><SectionHeader title={title} subtitle="Live maintenance tasks and scheduler state" actions={<Btn variant="secondary" size="md" icon={RefreshCw} onClick={() => void refreshMaintenance()} className="font-semibold px-5 py-3 hover:bg-slate-100">Refresh</Btn>} />{refreshStatus && (<div className={`rounded-xl border px-4 py-3 text-sm font-medium ${refreshStatus.type === "success" ? "border-emerald-100 bg-emerald-50 text-emerald-700" : "border-red-100 bg-red-50 text-red-700"}`}>{refreshStatus.message}</div>)}<div className="grid grid-cols-2 lg:grid-cols-3 gap-4"><KpiCard title="Active Tasks" value={maintenance?.activeTasks ?? 0} change="Live" changeType="stable" icon={Database} color="bg-blue-600" /><KpiCard title="Scheduled This Week" value={maintenance?.scheduledThisWeek ?? 0} change="Live" changeType="stable" icon={Calendar} color="bg-green-600" /><KpiCard title="Overdue Tasks" value={maintenance?.overdueTasks ?? 0} change="Live" changeType="down" icon={AlertTriangle} color="bg-red-500" /></div><Card padding="p-0"><table className="w-full text-xs"><thead><tr className="border-b border-gray-50">{["Task", "Environment", "Owner", "Status", "Scheduled"].map(h => <th key={h} className="text-left px-5 py-3 text-gray-400">{h}</th>)}</tr></thead><tbody>{(maintenance?.items ?? []).map(task => <tr key={task.id} className="border-b border-gray-50"><td className="px-5 py-3 font-semibold">{task.title}</td><td className="px-5 py-3">{task.environmentName}</td><td className="px-5 py-3">{task.ownerName}</td><td className="px-5 py-3"><StatusBadge status={task.status.toLowerCase()} /></td><td className="px-5 py-3">{date(task.scheduledStartUtc)}</td></tr>)}</tbody></table></Card></div>;
+  if (section === "users") return <div className="space-y-5"><SectionHeader title={title} subtitle="Live Microsoft Entra users synchronized by the IT Admin API" actions={<Btn variant="secondary" icon={RefreshCw} onClick={() => void load()}>Refresh</Btn>} /><Card padding="p-0"><table className="w-full text-xs"><thead><tr className="border-b border-gray-50">{["User", "Email", "Role", "Last Login"].map(h => <th key={h} className="text-left px-5 py-3 text-gray-400">{h}</th>)}</tr></thead><tbody>{users.map(user => <tr key={user.userId} className="border-b border-gray-50"><td className="px-5 py-3 font-semibold">{user.name}</td><td className="px-5 py-3">{user.email}</td><td className="px-5 py-3">{user.role}</td><td className="px-5 py-3">{date(user.lastLoginUtc)}</td></tr>)}{!loading && users.length === 0 && <tr><td className="px-5 py-6 text-gray-400" colSpan={4}>No users found.</td></tr>}</tbody></table></Card></div>;
+  if (section === "audit") return <div className="space-y-5"><SectionHeader title={title} subtitle="Live login and logout audit events" actions={<Btn variant="secondary" icon={RefreshCw} onClick={() => void load()}>Refresh</Btn>} /><Card padding="p-0"><table className="w-full text-xs"><thead><tr className="border-b border-gray-50">{["Timestamp", "User", "IP Address", "Status"].map(h => <th key={h} className="text-left px-5 py-3 text-gray-400">{h}</th>)}</tr></thead><tbody>{audits.map(audit => <tr key={audit.auditId} className="border-b border-gray-50"><td className="px-5 py-3">{date(audit.loginTime)}</td><td className="px-5 py-3">{audit.userName || audit.email}</td><td className="px-5 py-3">{audit.ipAddress || "-"}</td><td className="px-5 py-3"><StatusBadge status={audit.status.toLowerCase().includes("fail") ? "failed" : "success"} /></td></tr>)}{!loading && audits.length === 0 && <tr><td className="px-5 py-6 text-gray-400" colSpan={4}>No audit events found.</td></tr>}</tbody></table></Card></div>;
+  if (section === "maintenance") return <div className="space-y-5"><SectionHeader title={title} subtitle="Live maintenance tasks and scheduler state" actions={<Btn variant="secondary" icon={RefreshCw} onClick={() => void load()}>Refresh</Btn>} /><div className="grid grid-cols-2 lg:grid-cols-3 gap-4"><KpiCard title="Active Tasks" value={maintenance?.activeTasks ?? 0} change="Live" changeType="stable" icon={Database} color="bg-blue-600" /><KpiCard title="Scheduled This Week" value={maintenance?.scheduledThisWeek ?? 0} change="Live" changeType="stable" icon={Calendar} color="bg-green-600" /><KpiCard title="Overdue Tasks" value={maintenance?.overdueTasks ?? 0} change="Live" changeType="down" icon={AlertTriangle} color="bg-red-500" /></div><Card padding="p-0"><table className="w-full text-xs"><thead><tr className="border-b border-gray-50">{["Task", "Environment", "Owner", "Status", "Scheduled"].map(h => <th key={h} className="text-left px-5 py-3 text-gray-400">{h}</th>)}</tr></thead><tbody>{(maintenance?.items ?? []).map(task => <tr key={task.id} className="border-b border-gray-50"><td className="px-5 py-3 font-semibold">{task.title}</td><td className="px-5 py-3">{task.environmentName}</td><td className="px-5 py-3">{task.ownerName}</td><td className="px-5 py-3"><StatusBadge status={task.status.toLowerCase()} /></td><td className="px-5 py-3">{date(task.scheduledStartUtc)}</td></tr>)}</tbody></table></Card></div>;
 
   const eventRows = [...(logs?.items ?? []).map(item => ({ time: item.createdAtUtc, type: item.category, message: item.message, status: item.severity })), ...(monitoring?.recentJobs ?? []).map(job => ({ time: job.startedAtUtc, type: "Azure DevOps Sync", message: `${job.scopeName} ${job.status}`, status: job.status }))].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
-  if (section === "monitoring") return <div className="space-y-5"><SectionHeader title={title} subtitle="Live Azure DevOps synchronization and platform monitoring" actions={<Btn variant="secondary" size="md" icon={RefreshCw} onClick={() => void refreshMonitoring()} className="font-semibold px-5 py-3 hover:bg-slate-100">Refresh</Btn>} />{refreshStatus && (<div className={`rounded-xl border px-4 py-3 text-sm font-medium ${refreshStatus.type === "success" ? "border-emerald-100 bg-emerald-50 text-emerald-700" : "border-red-100 bg-red-50 text-red-700"}`}>{refreshStatus.message}</div>)}<div className="grid grid-cols-2 lg:grid-cols-4 gap-4"><KpiCard title="Failed Jobs" value={monitoring?.failedJobs ?? 0} change="Live" changeType="down" icon={XCircle} color="bg-red-500" /><KpiCard title="Warnings" value={monitoring?.warningLogs ?? 0} change="Live" changeType="stable" icon={AlertTriangle} color="bg-amber-500" /><KpiCard title="Sync Jobs Today" value={monitoring?.totalJobsToday ?? 0} change="Live" changeType="stable" icon={RefreshCw} color="bg-blue-600" /><KpiCard title="Database" value={health?.databaseReachable ? "Healthy" : "Unavailable"} change="Live" changeType={health?.databaseReachable ? "up" : "down"} icon={Database} color="bg-purple-600" /></div><Card padding="p-0"><table className="w-full text-xs"><thead><tr className="border-b border-gray-50">{["Timestamp", "Type", "Event", "Status"].map(h => <th key={h} className="text-left px-5 py-3 text-gray-400">{h}</th>)}</tr></thead><tbody>{eventRows.slice(0, 100).map((event, index) => <tr key={`${event.time}-${index}`} className="border-b border-gray-50"><td className="px-5 py-3">{date(event.time)}</td><td className="px-5 py-3">{event.type}</td><td className="px-5 py-3">{event.message}</td><td className="px-5 py-3"><StatusBadge status={event.status.toLowerCase().includes("fail") || event.status.toLowerCase().includes("error") ? "failed" : "success"} /></td></tr>)}</tbody></table></Card></div>;
+  if (section === "monitoring") return <div className="space-y-5"><SectionHeader title={title} subtitle="Live Azure DevOps synchronization and platform monitoring" actions={<Btn variant="secondary" icon={RefreshCw} onClick={() => void load()}>Refresh</Btn>} /><div className="grid grid-cols-2 lg:grid-cols-4 gap-4"><KpiCard title="Failed Jobs" value={monitoring?.failedJobs ?? 0} change="Live" changeType="down" icon={XCircle} color="bg-red-500" /><KpiCard title="Warnings" value={monitoring?.warningLogs ?? 0} change="Live" changeType="stable" icon={AlertTriangle} color="bg-amber-500" /><KpiCard title="Sync Jobs Today" value={monitoring?.totalJobsToday ?? 0} change="Live" changeType="stable" icon={RefreshCw} color="bg-blue-600" /><KpiCard title="Database" value={health?.databaseReachable ? "Healthy" : "Unavailable"} change="Live" changeType={health?.databaseReachable ? "up" : "down"} icon={Database} color="bg-purple-600" /></div><Card padding="p-0"><table className="w-full text-xs"><thead><tr className="border-b border-gray-50">{["Timestamp", "Type", "Event", "Status"].map(h => <th key={h} className="text-left px-5 py-3 text-gray-400">{h}</th>)}</tr></thead><tbody>{eventRows.slice(0, 100).map((event, index) => <tr key={`${event.time}-${index}`} className="border-b border-gray-50"><td className="px-5 py-3">{date(event.time)}</td><td className="px-5 py-3">{event.type}</td><td className="px-5 py-3">{event.message}</td><td className="px-5 py-3"><StatusBadge status={event.status.toLowerCase().includes("fail") || event.status.toLowerCase().includes("error") ? "failed" : "success"} /></td></tr>)}</tbody></table></Card></div>;
 
-  return <div className="space-y-5"><SectionHeader title={title} subtitle="Live Azure DevOps integration and application status" actions={<div className="flex gap-2"><Btn variant="secondary" icon={Terminal} onClick={() => onNavigate("/audit-logs")}>Audit Logs</Btn><Btn variant="primary" icon={RefreshCw} onClick={() => void runSync()}>Manual Sync</Btn></div>} />{error && <div className="text-sm text-red-600">{error}</div>}<div className="grid grid-cols-2 lg:grid-cols-5 gap-4"><KpiCard title="Azure DevOps" value={health?.azureDevOpsConfigured ? "Connected" : "Not configured"} change="Live" changeType={health?.azureDevOpsConfigured ? "up" : "down"} icon={GitBranch} color="bg-blue-600" /><KpiCard title="Database" value={health?.databaseReachable ? "Online" : "Offline"} change="Live" changeType={health?.databaseReachable ? "up" : "down"} icon={Database} color="bg-green-600" /><KpiCard title="Sync Service" value={health?.synchronizationEnabled ? "Enabled" : "Disabled"} change="Live" changeType="stable" icon={RefreshCw} color="bg-purple-600" /><KpiCard title="Running Jobs" value={health?.runningSynchronizationJobs ?? 0} change="Live" changeType="stable" icon={Activity} color="bg-indigo-500" /><KpiCard title="Failed (24h)" value={synchronization?.failedRuns24h ?? 0} change="Live" changeType="down" icon={AlertTriangle} color="bg-amber-500" /></div><Card padding="p-0"><div className="p-5 border-b border-gray-100"><SectionHeader title="Azure DevOps Synchronization" subtitle={loading ? "Loading live data..." : `Last successful sync: ${date(synchronization?.lastSuccessfulSyncUtc)}`} /></div><table className="w-full text-xs"><thead><tr className="border-b border-gray-50">{["Scope", "Trigger", "Started", "Items", "Status"].map(h => <th key={h} className="text-left px-5 py-3 text-gray-400">{h}</th>)}</tr></thead><tbody>{(synchronization?.recentJobs ?? []).map(job => <tr key={job.jobId} className="border-b border-gray-50"><td className="px-5 py-3 font-semibold">{job.scopeName}</td><td className="px-5 py-3">{job.source}</td><td className="px-5 py-3">{date(job.startedAtUtc)}</td><td className="px-5 py-3">{job.itemsProcessed}</td><td className="px-5 py-3"><StatusBadge status={job.status.toLowerCase()} /></td></tr>)}</tbody></table></Card><Card><SectionHeader title="Scheduler" subtitle={`${scheduling?.enabledSchedules ?? 0} enabled schedules · ${scheduling?.overdueSchedules ?? 0} overdue`} /></Card></div>;
+  return <div className="space-y-5"><SectionHeader title={title} subtitle="Live Azure DevOps integration and application status" actions={<div className="flex gap-2"><Btn variant="secondary" icon={Terminal} onClick={() => onNavigate("/audit-logs")}>Audit Logs</Btn><Btn variant="primary" icon={RefreshCw} onClick={() => void runSync()}>Manual Sync</Btn></div>} />{error && <div className="text-sm text-red-600">{error}</div>}<div className="grid grid-cols-2 lg:grid-cols-5 gap-4"><KpiCard title="Azure DevOps" value={health?.azureDevOpsConfigured ? "Connected" : "Not configured"} change="Live" changeType={health?.azureDevOpsConfigured ? "up" : "down"} icon={GitBranch} color="bg-blue-600" /><KpiCard title="Database" value={health?.databaseReachable ? "Online" : "Offline"} change="Live" changeType={health?.databaseReachable ? "up" : "down"} icon={Database} color="bg-green-600" /><KpiCard title="Sync Service" value={health?.synchronizationEnabled ? "Enabled" : "Disabled"} change="Live" changeType="stable" icon={RefreshCw} color="bg-purple-600" /><KpiCard title="Running Jobs" value={health?.runningSynchronizationJobs ?? 0} change="Live" changeType="stable" icon={Activity} color="bg-indigo-500" /><KpiCard title="Failed (24h)" value={synchronization?.failedRuns24h ?? 0} change="Live" changeType="down" icon={AlertTriangle} color="bg-amber-500" /></div><Card padding="p-0"><div className="p-5 border-b border-gray-100"><SectionHeader title="Azure DevOps Synchronization" subtitle={loading ? "Loading live data..." : `Last successful sync: ${synchronization?.lastSuccessfulSyncUtc ? formatToIst(synchronization.lastSuccessfulSyncUtc) : "Never"}`} /></div><table className="w-full text-xs"><thead><tr className="border-b border-gray-50">{["Scope", "Trigger", "Started", "Items", "Status"].map(h => <th key={h} className="text-left px-5 py-3 text-gray-400">{h}</th>)}</tr></thead><tbody>{(synchronization?.recentJobs ?? []).map(job => <tr key={job.jobId} className="border-b border-gray-50"><td className="px-5 py-3 font-semibold">{job.scopeName}</td><td className="px-5 py-3">{job.source}</td><td className="px-5 py-3">{date(job.startedAtUtc)}</td><td className="px-5 py-3">{job.itemsProcessed}</td><td className="px-5 py-3"><StatusBadge status={job.status.toLowerCase()} /></td></tr>)}</tbody></table></Card><Card><SectionHeader title="Scheduler" subtitle={`${scheduling?.enabledSchedules ?? 0} enabled schedules · ${scheduling?.overdueSchedules ?? 0} overdue`} /></Card></div>;
 };
 
 const ITMonitoringPage = () => (
   <div className="space-y-6" style={{ fontFamily: "Inter, sans-serif" }}>
     <div>
       <h2 className="text-xl font-bold text-gray-900">Monitoring</h2>
-      <p className="text-sm text-gray-500">Failed jobs, alerts and error logs</p>
+      <p className="text-sm text-gray-500">Failed jobs, alerts, notifications and error logs</p>
     </div>
-    <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
       <KpiCard title="Failed Jobs" value="2" change="Needs retry" changeType="down" icon={XCircle} color="bg-red-500" />
       <KpiCard title="Alerts" value="7" change="3 critical" changeType="down" icon={Bell} color="bg-amber-500" />
+      <KpiCard title="Notifications" value="14" change="Queued" changeType="stable" icon={Mail} color="bg-blue-600" />
       <KpiCard title="Error Logs" value="5" change="Last hour" changeType="down" icon={AlertCircle} color="bg-red-600" />
     </div>
     <Card padding="p-0">
@@ -5296,6 +5550,7 @@ const ITMonitoringPage = () => (
             ["10:45", "Failed Job", "Sync Scheduler", "FinBank retry exhausted", "failed"],
             ["10:30", "Alert", "API Gateway", "Latency above threshold", "warning"],
             ["10:12", "Error", "Azure OpenAI", "Transient token refresh failure", "warning"],
+            ["09:58", "Notification", "Email", "Digest delivery completed", "success"],
           ].map(row => <tr key={row.join("-")} className="border-b border-gray-50 hover:bg-gray-50">{row.map((cell, i) => <td key={i} className="px-5 py-3 text-gray-600">{i === 4 ? <StatusBadge status={cell} /> : cell}</td>)}</tr>)}
         </tbody>
       </table>
@@ -5556,10 +5811,6 @@ export default function App({ embeddedRole, embeddedEmail, onEmbeddedLogout }: E
   const [liveAdminDeliveryKpiOverview, setLiveAdminDeliveryKpiOverview] = useState<ReportsOverviewDto | null>(null);
   const [liveAdminDeliveryKpiProjectDetails, setLiveAdminDeliveryKpiProjectDetails] = useState<AdminProjectDetailsDto | null>(null);
   const [selectedSprintGovernanceProjectId, setSelectedSprintGovernanceProjectId] = useState<number | null>(null);
-  const [aiInsightsMessages, setAiInsightsMessages] = useState<AiChatMessage[]>([
-    { role: "assistant", msg: "Hello! I'm Sarathi AI. Select an assigned project and ask about delivery health, sprint progress, blockers, risks, work items, or recommendations." },
-  ]);
-  const [aiInsightsSelectedProjectId, setAiInsightsSelectedProjectId] = useState<number | null>(null);
   const [liveAdminSprintGovernance, setLiveAdminSprintGovernance] = useState<ProjectSprintGovernanceDto | null>(null);
   const [selectedPmSprintGovernanceProjectId, setSelectedPmSprintGovernanceProjectId] = useState<number | null>(null);
   const [livePmSprintGovernance, setLivePmSprintGovernance] = useState<ProjectManagerSprintGovernanceDto | null>(null);
@@ -5588,10 +5839,6 @@ export default function App({ embeddedRole, embeddedEmail, onEmbeddedLogout }: E
     setLoggedIn(false);
     setEmail("");
     setRole("Administrator");
-    setAiInsightsMessages([
-      { role: "assistant", msg: "Hello! I'm Sarathi AI. Select an assigned project and ask about delivery health, sprint progress, blockers, risks, work items, or recommendations." },
-    ]);
-    setAiInsightsSelectedProjectId(null);
     navigate("/");
   };
 
@@ -5860,6 +6107,52 @@ export default function App({ embeddedRole, embeddedEmail, onEmbeddedLogout }: E
     return <LoginScreen onLogin={handleLogin} />;
   }
 
+  const waitForSyncJobCompletion = async (jobId: number, timeoutMs = 120000, intervalMs = 2000): Promise<AzureDevOpsSyncJobSummaryDto | null> => {
+    const maxAttempts = Math.max(1, Math.floor(timeoutMs / intervalMs));
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const jobs = await azureDevOpsService.getSyncJobs(50);
+      const job = jobs.items.find(item => item.jobId === jobId);
+      if (job) {
+        if (job.status.toLowerCase() === 'completed' || job.status.toLowerCase() === 'failed') {
+          return job;
+        }
+      }
+
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+
+    return null;
+  };
+
+  const refreshProjectStatistics = async () => {
+    const statistics = await adminService.getProjectStatistics(25);
+    setLiveProjects(mapAdminProjectsToCatalog(statistics.projects));
+    setLiveAdminStats(statistics);
+  };
+
+  const refreshReportsOverview = async (projectId?: number) => {
+    setLiveReportsOverview(null);
+    try {
+      const overview = await reportsService.getOverview(projectId);
+      setLiveReportsOverview(overview);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('Failed to refresh reports overview', e);
+      setLiveReportsOverview(null);
+      throw e;
+    }
+  };
+
+  const refreshProjectDetails = async () => {
+    if (!selectedAdminProjectId) return;
+    try {
+      const details = await adminService.getProjectDetails(selectedAdminProjectId);
+      setSelectedProjectDetails(details);
+    } catch (detailsError) {
+      console.error('Failed to refresh project details after sync:', detailsError);
+    }
+  };
+
   const handleProjectSelect = async (projectId: number) => {
     setSelectedAdminProjectId(projectId);
     goTo(`/projects/${projectId}`);
@@ -5872,25 +6165,23 @@ export default function App({ embeddedRole, embeddedEmail, onEmbeddedLogout }: E
 
   const handleSyncNow = async () => {
     try {
-      await azureDevOpsService.queueSynchronization({
+      const response = await azureDevOpsService.queueSynchronization({
         syncType: 'Full',
         scopeName: 'All Projects',
-        source: 'Manual'
+        source: 'Manual',
       });
 
-      // The background worker processes the queued Azure DevOps job; refresh the current view immediately.
-      const statistics = await adminService.getProjectStatistics(25);
-      setLiveProjects(mapAdminProjectsToCatalog(statistics.projects));
-      setLiveAdminStats(statistics);
-
-      if (selectedAdminProjectId) {
-        try {
-          const details = await adminService.getProjectDetails(selectedAdminProjectId);
-          setSelectedProjectDetails(details);
-        } catch (detailsError) {
-          console.error('Failed to refresh project details after sync:', detailsError);
+      try {
+        const completedJob = await waitForSyncJobCompletion(response.jobId);
+        if (completedJob && completedJob.status.toLowerCase() === 'failed') {
+          console.warn(`Azure DevOps sync job ${response.jobId} completed with failure.`);
         }
+      } catch (pollError) {
+        console.warn('Azure DevOps sync completed but waiting for status failed:', pollError);
       }
+
+      await refreshProjectStatistics();
+      await refreshProjectDetails();
     } catch (error) {
       console.error('Failed to trigger sync:', error);
     }
@@ -5899,7 +6190,7 @@ export default function App({ embeddedRole, embeddedEmail, onEmbeddedLogout }: E
   const ROUTES: Record<string, React.ReactNode> = {
     "/portfolio": <PortfolioEnterpriseDashboard onNavigate={goTo} projects={liveProjects ?? []} dashboardKpis={liveDashboardKpis} adminStats={liveAdminStats} />,
     "/projects": <ProjectsPage onNavigate={goTo} projects={liveProjects ?? []} onProjectSelect={handleProjectSelect} onSyncNow={handleSyncNow} azureOrgUrl={azureOrgUrl} />,
-    "/projects/:projectId": <ProjectDetails projectDetails={selectedProjectDetails} azureOrgUrl={azureOrgUrl} onSyncNow={handleSyncNow} isLoading={isProjectDetailsLoading} error={selectedProjectDetailsError} />,
+    "/projects/:projectId": <ProjectDetails projectDetails={selectedProjectDetails} azureOrgUrl={azureOrgUrl} onSyncNow={handleSyncNow} isLoading={isProjectDetailsLoading} error={selectedProjectDetailsError} onNavigate={goTo} />,
     "/my-projects": <MyProjectsPage email={email} onNavigate={goTo} projectsOverride={liveProjects ?? undefined} />,
     "/executive": <RoleSummaryDashboard role="Executive" />,
     "/pmo": <RoleSummaryDashboard role="PMO" />,
@@ -5924,16 +6215,10 @@ export default function App({ embeddedRole, embeddedEmail, onEmbeddedLogout }: E
       isAdministrator
       isLoading={isDeliveryKpiLoading}
     />,
-    "/sprint-governance": <SprintGovernance reportsOverview={liveReportsOverview} pmSprintProgress={livePmSprintProgress} pmWorkItems={livePmWorkItems} adminGovernance={role === "Administrator" ? liveAdminSprintGovernance : livePmSprintGovernance} projects={role === "Administrator" || role === "Project Manager" ? liveProjects ?? [] : []} selectedProjectId={role === "Administrator" ? selectedSprintGovernanceProjectId : selectedPmSprintGovernanceProjectId} onProjectSelect={role === "Administrator" ? setSelectedSprintGovernanceProjectId : role === "Project Manager" ? setSelectedPmSprintGovernanceProjectId : undefined} />,
-    "/risk-center": <AIRiskAnalysis projects={liveProjects ?? []} reportsOverview={liveReportsOverview} projectScopeLabel={role === "Project Manager" ? "assigned projects" : "projects"} />,
-    "/pm-risk-analysis": <ProjectManagerRiskAnalysisPage email={email} onNavigate={goTo} projectsOverride={liveProjects ?? undefined} />,
-    "/ai-insights": <AIInsights
-      projects={role === "Project Manager" ? liveProjects ?? [] : []}
-      messages={aiInsightsMessages}
-      onMessagesChange={setAiInsightsMessages}
-      selectedProjectId={aiInsightsSelectedProjectId}
-      onSelectedProjectIdChange={setAiInsightsSelectedProjectId}
-    />,
+    "/sprint-governance": <SprintGovernance reportsOverview={liveReportsOverview} pmSprintProgress={livePmSprintProgress} pmWorkItems={livePmWorkItems} adminGovernance={role === "Administrator" ? liveAdminSprintGovernance : livePmSprintGovernance} projects={role === "Administrator" || role === "Project Manager" ? liveProjects ?? [] : []} selectedProjectId={role === "Administrator" ? selectedSprintGovernanceProjectId : selectedPmSprintGovernanceProjectId} onProjectSelect={role === "Administrator" ? setSelectedSprintGovernanceProjectId : role === "Project Manager" ? setSelectedPmSprintGovernanceProjectId : undefined} showProjectSelector={role === "Administrator"} />,
+    "/risk-center": <AIRiskAnalysis projects={liveProjects ?? []} reportsOverview={liveReportsOverview} projectScopeLabel={role === "Project Manager" ? "assigned projects" : "projects"} onRefresh={refreshReportsOverview} />,
+    "/pm-risk-analysis": <AIRiskAnalysis projects={liveProjects ?? []} reportsOverview={liveReportsOverview} projectScopeLabel="assigned projects" onRefresh={refreshReportsOverview} showProjectSelector={false} />,
+    "/ai-insights": <AIInsights projects={role === "Project Manager" ? liveProjects ?? [] : []} />,
     "/sprint-board": <SprintGovernance />,
     "/velocity": <KPIDashboard
       reportsOverview={role === "Administrator" ? liveAdminDeliveryKpiOverview : liveReportsOverview}
@@ -5948,13 +6233,7 @@ export default function App({ embeddedRole, embeddedEmail, onEmbeddedLogout }: E
     "/burndown": <ProjectDetails />,
     "/executive-reports": <AIExecutiveReports projects={liveProjects ?? []} reportsOverview={liveReportsOverview} isAdministrator={role === "Administrator"} />,
     "/reports": <AIExecutiveReports projects={liveProjects ?? []} reportsOverview={liveReportsOverview} isAdministrator={role === "Administrator"} />,
-    "/ai-summary": <AIInsights
-      messages={aiInsightsMessages}
-      onMessagesChange={setAiInsightsMessages}
-      selectedProjectId={aiInsightsSelectedProjectId}
-      onSelectedProjectIdChange={setAiInsightsSelectedProjectId}
-      projects={role === "Project Manager" ? liveProjects ?? [] : []}
-    />,
+    "/ai-summary": <AIInsights />,
     "/governance": <RoleSummaryDashboard role="PMO" />,
     "/azure-devops": <SyncMonitor />,
     "/users": <ITLiveOperationsPage section="users" onNavigate={goTo} />,

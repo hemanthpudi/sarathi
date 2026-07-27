@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using Serilog;
+using Sarathi.API.Application.DTOs.Email;
 using Sarathi.API.Application.Interfaces;
 using Sarathi.API.Application.Services;
 using Sarathi.API.Infrastructure.AzureDevOps;
@@ -21,35 +22,7 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    var contentRoot = Directory.GetCurrentDirectory();
-    var envFile = Path.Combine(contentRoot, ".env");
-    if (File.Exists(envFile))
-    {
-        foreach (var line in File.ReadAllLines(envFile))
-        {
-            var trimmed = line.Trim();
-            if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith("#"))
-            {
-                continue;
-            }
-
-            var parts = trimmed.Split('=', 2);
-            if (parts.Length != 2)
-            {
-                continue;
-            }
-
-            var key = parts[0].Trim();
-            var value = parts[1].Trim();
-            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(key)))
-            {
-                Environment.SetEnvironmentVariable(key, value);
-            }
-        }
-    }
-
     var builder = WebApplication.CreateBuilder(args);
-    builder.Configuration.AddEnvironmentVariables();
 
     // ── Serilog ──────────────────────────────────────────────────────────────
     builder.Host.UseSerilog((ctx, lc) =>
@@ -119,7 +92,9 @@ try
         });
     });
 
-    // ── Application Services ──────────────────────────────────────────────────
+    // ── Application Services ───────────────────────────────────────────────────────────
+    builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email"));
+    builder.Services.AddScoped<IEmailService, EmailService>();
     builder.Services.AddScoped<IAuthService, AuthService>();
     builder.Services.AddScoped<IAdminService, AdminService>();
     builder.Services.AddScoped<IAzureDevOpsIntegrationService, AzureDevOpsIntegrationService>();
@@ -129,7 +104,6 @@ try
     builder.Services.AddScoped<INotificationService, NotificationService>();
     builder.Services.AddScoped<INotificationRealtimeService, NotificationRealtimeService>();
     builder.Services.AddScoped<IProjectManagerService, ProjectManagerService>();
-    builder.Services.AddScoped<IProjectContextBuilder, ProjectContextBuilder>();
     builder.Services.AddHttpClient<IProjectManagerAiService, GeminiProjectManagerAiService>(client => client.Timeout = TimeSpan.FromSeconds(30));
     builder.Services.AddScoped<IReportsService, ReportsService>();
     builder.Services.AddScoped<IAuditLogService, AuditLogService>();

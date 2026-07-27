@@ -22,5 +22,7 @@ public class Build
 
     public DateTime? FinishTime { get; set; }
 
+    public string? TriggerType { get; set; }
+
     public Project Project { get; set; } = null!;
 }

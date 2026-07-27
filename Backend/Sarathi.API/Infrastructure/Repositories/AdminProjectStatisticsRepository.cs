@@ -48,6 +48,23 @@ public class AdminProjectStatisticsRepository : IAdminProjectStatisticsRepositor
             })
             .ToListAsync(cancellationToken);
 
+        var projectIds = projects.Select(item => item.ProjectId).ToList();
+        var projectManagerMetadata = await (from assignment in _dbContext.ProjectManagerAssignments.AsNoTracking()
+                                               join user in _dbContext.Users.AsNoTracking() on assignment.ProjectManagerUserId equals user.UserId
+                                               where projectIds.Contains(assignment.ProjectId)
+                                               group new { assignment.ProjectId, assignment.AssignedAtUtc, user.Name, user.Email } by assignment.ProjectId into grouped
+                                               select new
+                                               {
+                                                   ProjectId = grouped.Key,
+                                                   ProjectManagerName = grouped.OrderByDescending(item => item.AssignedAtUtc)
+                                                       .Select(item => item.Name)
+                                                       .FirstOrDefault(),
+                                                   ProjectManagerEmail = grouped.OrderByDescending(item => item.AssignedAtUtc)
+                                                       .Select(item => item.Email)
+                                                       .FirstOrDefault(),
+                                               })
+            .ToDictionaryAsync(item => item.ProjectId, item => new { item.ProjectManagerName, item.ProjectManagerEmail }, cancellationToken);
+
         var items = projects.Select(project => new AdminProjectStatisticItemDto
         {
             ProjectId = project.ProjectId,
@@ -59,6 +76,8 @@ public class AdminProjectStatisticsRepository : IAdminProjectStatisticsRepositor
             DefectDensity = project.LatestKpi?.DefectDensity,
             RiskScore = project.LatestRisk?.RiskScore,
             RiskLevel = project.LatestRisk?.RiskLevel,
+            ProjectManagerName = projectManagerMetadata.TryGetValue(project.ProjectId, out var managerInfo) ? managerInfo.ProjectManagerName : "Not Assigned",
+            ProjectManagerEmail = projectManagerMetadata.TryGetValue(project.ProjectId, out var managerInfo2) ? managerInfo2.ProjectManagerEmail : null,
         }).ToList();
 
         var totalProjects = await _dbContext.Projects.CountAsync(cancellationToken);

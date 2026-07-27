@@ -1,9 +1,14 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Sarathi.API.Persistence;
 
 #nullable disable
 
 namespace Sarathi.API.Migrations;
 
+[DbContext(typeof(AppDbContext))]
+[Migration("20260722120000_AddRepositoriesAndBuilds")]
 public partial class AddRepositoriesAndBuilds : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)

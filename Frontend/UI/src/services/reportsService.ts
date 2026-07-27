@@ -76,4 +76,13 @@ export const reportsService = {
     });
     return response.data;
   },
+
+  async emailStakeholders(projectId: number, to: string, subject: string, body: string): Promise<void> {
+    await reportsApi.post('/api/email/send', {
+      projectId,
+      to,
+      subject,
+      body,
+    });
+  },
 };

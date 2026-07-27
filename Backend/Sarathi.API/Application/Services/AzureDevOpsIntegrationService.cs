@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Microsoft.AspNetCore.DataProtection;
 using Sarathi.API.Application.DTOs.AzureDevOps;
 using Sarathi.API.Application.Interfaces;
@@ -293,6 +294,9 @@ public class AzureDevOpsIntegrationService : IAzureDevOpsIntegrationService
                     ? "Warning"
                     : "Success";
 
+            // For live snapshot, LastSyncUtc is now (when we fetched the data)
+            var lastSyncUtc = DateTime.UtcNow;
+
             DateTime? latestActivityUtc = builds
                 .Select(item => item.FinishTimeUtc ?? item.StartTimeUtc)
                 .Where(item => item.HasValue)
@@ -312,7 +316,7 @@ public class AzureDevOpsIntegrationService : IAzureDevOpsIntegrationService
                 ProjectName = project.Name,
                 OrganizationName = GetOrganizationName(organizationUrl),
                 Status = status,
-                LastSyncUtc = latestActivityUtc,
+                LastSyncUtc = lastSyncUtc,
                 Items = workItems.Count + repositories.Count + builds.Count,
                 DurationSeconds = durationSeconds > 0 ? durationSeconds : null,
                 Errors = failedBuilds + blockedItems,
@@ -338,7 +342,16 @@ public class AzureDevOpsIntegrationService : IAzureDevOpsIntegrationService
     {
         if (!string.IsNullOrWhiteSpace(configuration.AzureDevOpsPatCipherText))
         {
-            return _protector.Unprotect(configuration.AzureDevOpsPatCipherText);
+            try
+            {
+                return _protector.Unprotect(configuration.AzureDevOpsPatCipherText);
+            }
+            catch (CryptographicException ex)
+            {
+                // The stored ciphertext is invalid or not compatible with current data protection keys.
+                // Fall back to the configured PAT from environment or app settings.
+                Console.WriteLine($"Azure DevOps PAT decryption failed: {ex.Message}");
+            }
         }
 
         return _configuredPersonalAccessToken ?? string.Empty;

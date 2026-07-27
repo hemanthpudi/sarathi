@@ -18,6 +18,10 @@ public class ProjectManagerAssignedProjectDto
 
     public decimal? SprintVelocity { get; set; }
 
+    public decimal? RiskScore { get; set; }
+
+    public string RiskLevel { get; set; } = string.Empty;
+
     public int BlockedItems { get; set; }
 
     public DateTime LastUpdated { get; set; }

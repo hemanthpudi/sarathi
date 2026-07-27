@@ -198,6 +198,7 @@ public class AzureDevOpsClient : IAzureDevOpsClient
                     SourceBranch = element.TryGetProperty("sourceBranch", out var sourceBranch) ? sourceBranch.GetString() ?? string.Empty : string.Empty,
                     StartTimeUtc = element.TryGetProperty("startTime", out var startTime) ? ParseDateTime(startTime) : null,
                     FinishTimeUtc = element.TryGetProperty("finishTime", out var finishTime) ? ParseDateTime(finishTime) : null,
+                    TriggerType = element.TryGetProperty("reason", out var reason) ? reason.GetString() : null,
                 });
             }
 
